@@ -8,6 +8,7 @@ import WebKit
 final class WebAutomationService: NSObject {
     private var webViews: [ProviderID: WKWebView] = [:]
     private var signInWindows: [ProviderID: NSWindow] = [:]
+    private var signInDelegates: [ProviderID: SignInNavigationDelegate] = [:]
     private let dataStore = WKWebsiteDataStore.default()
 
     /// Returns or creates the persistent WKWebView for a provider.
@@ -24,10 +25,9 @@ final class WebAutomationService: NSObject {
     }
 
     /// Opens the persistent WKWebView in a visible window for sign-in.
-    /// When the user closes the window, onClose is called.
-    /// The WKWebView stays alive -- only detached from the window.
-    func signIn(for provider: ProviderID, onClose: @escaping () -> Void) {
-        // If already showing, bring to front
+    /// `onAuth` is called when sign-in is detected (page navigates away from login).
+    /// Also called when the window is closed.
+    func signIn(for provider: ProviderID, onAuth: @escaping () -> Void) {
         if let existing = signInWindows[provider] {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
@@ -47,12 +47,15 @@ final class WebAutomationService: NSObject {
         window.isReleasedWhenClosed = false
         window.center()
 
-        // Attach the persistent WKWebView to this window
         wv.frame = window.contentView!.bounds
         wv.autoresizingMask = [.width, .height]
         window.contentView!.addSubview(wv)
 
-        // Navigate to login page
+        // Watch navigations: detect when user finishes login
+        let delegate = SignInNavigationDelegate(provider: provider, onAuth: onAuth)
+        signInDelegates[provider] = delegate
+        wv.navigationDelegate = delegate
+
         wv.load(URLRequest(url: provider.loginURL))
 
         signInWindows[provider] = window
@@ -68,43 +71,57 @@ final class WebAutomationService: NSObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                // Detach webview from window but keep it alive
                 let wv = self.webView(for: provider)
                 wv.removeFromSuperview()
+                wv.navigationDelegate = nil
                 self.signInWindows.removeValue(forKey: provider)
+                self.signInDelegates.removeValue(forKey: provider)
 
                 if self.signInWindows.isEmpty {
                     NSApp.setActivationPolicy(.accessory)
                 }
 
-                // Small delay to let the webview settle, then poll
                 try? await Task.sleep(for: .seconds(1))
-                onClose()
+                onAuth()
             }
         }
     }
 
     /// Uses the persistent WKWebView for this provider to navigate to a URL
     /// and run a JS script. Returns the JSON string from the script.
-    func evaluateJSON(for provider: ProviderID, at url: URL, script: String) async throws -> String {
+    func evaluateJSON(for provider: ProviderID, at url: URL, script: String, waitForDOM: Bool = true) async throws -> String {
         let wv = webView(for: provider)
+
+        // Clear the sign-in delegate so it doesn't interfere with polling navigation
+        let savedDelegate = signInDelegates[provider]
+        wv.navigationDelegate = nil
 
         // Navigate to the usage URL
         let loader = NavigationLoader()
         wv.navigationDelegate = loader
         try await loader.load(url: url, in: wv)
 
-        // Wait for SPA content to render -- look for actual percentage data
-        for _ in 0..<20 {
-            try? await Task.sleep(for: .seconds(1))
-            let found = try? await wv.evaluateJavaScript(
-                "(/\\d{1,3}\\s*%\\s*(igjen|remaining|left|used)/i).test(document.body.innerText)"
-            )
-            if found as? Bool == true { break }
+        // Wait for SPA content to render (only for DOM scrapers, not API fetchers)
+        if waitForDOM {
+            for _ in 0..<30 {
+                try? await Task.sleep(for: .seconds(1))
+                let found = try? await wv.evaluateJavaScript(
+                    "(/\\d{1,3}\\s*%\\s*(igjen|remaining|left|used)/i).test(document.body.innerText)"
+                )
+                if found as? Bool == true { break }
+            }
+        } else {
+            // Brief pause for page JS to initialize
+            try? await Task.sleep(for: .seconds(2))
         }
 
         // Run the scraping script
         let result = try await wv.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
+
+        // Restore sign-in delegate if window is still open
+        if let saved = savedDelegate, signInWindows[provider] != nil {
+            wv.navigationDelegate = saved
+        }
 
         guard let string = result as? String else {
             throw ProviderError.invalidPayload("\(provider.title) did not return a JSON string")
@@ -114,7 +131,43 @@ final class WebAutomationService: NSObject {
     }
 }
 
-// MARK: - Navigation helper
+// MARK: - Detects when user completes sign-in by watching URL changes
+
+@MainActor
+final class SignInNavigationDelegate: NSObject, WKNavigationDelegate {
+    private let provider: ProviderID
+    private let onAuth: () -> Void
+    private var hasTriggered = false
+    private var loadCount = 0
+
+    init(provider: ProviderID, onAuth: @escaping () -> Void) {
+        self.provider = provider
+        self.onAuth = onAuth
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        loadCount += 1
+
+        // Skip the first load (that's the login page itself)
+        if loadCount <= 1 { return }
+
+        // After the first navigation completes, the user likely signed in.
+        // Trigger a refresh. Use a flag to avoid spamming.
+        if !hasTriggered {
+            hasTriggered = true
+            // Delay slightly to let the page settle after auth redirect
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                self.onAuth()
+                // Reset so subsequent navigations can trigger again
+                try? await Task.sleep(for: .seconds(10))
+                self.hasTriggered = false
+            }
+        }
+    }
+}
+
+// MARK: - Navigation helper for polling
 
 @MainActor
 private final class NavigationLoader: NSObject, WKNavigationDelegate {
