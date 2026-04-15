@@ -43,6 +43,7 @@ final class UsageStore: ObservableObject {
         automation.signIn(for: provider) { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                NotificationCenter.default.post(name: .signInCompleted, object: nil)
                 await self.refreshSingle(provider)
             }
         }

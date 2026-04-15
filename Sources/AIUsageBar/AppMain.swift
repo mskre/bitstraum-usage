@@ -133,6 +133,19 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         store.$isRefreshing
             .sink { [weak self] refreshing in self?.previewView?.isRefreshing = refreshing }
             .store(in: &cancellables)
+
+        NotificationCenter.default.addObserver(
+            forName: .signInCompleted,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                // Small delay to let the sign-in window fully close
+                // and activation policy switch back to .accessory
+                try? await Task.sleep(for: .milliseconds(500))
+                self?.showPanel()
+            }
+        }
     }
 
     // MARK: - Liquid Glass Panel
@@ -185,7 +198,11 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
             return
         }
 
-        guard let button = statusItem.button,
+        showPanel()
+    }
+
+    private func showPanel() {
+        guard let panel, let button = statusItem.button,
               let buttonWindow = button.window else { return }
 
         let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))

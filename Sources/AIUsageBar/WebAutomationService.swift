@@ -197,25 +197,51 @@ final class SignInNavigationDelegate: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         // Update window title with current URL
-        if let url = webView.url {
-            let host = url.host ?? url.absoluteString
-            window?.title = "\(provider.title) — \(host)"
-        }
+        guard let url = webView.url else { return }
+        let host = url.host ?? url.absoluteString
+        let path = url.path.lowercased()
+        window?.title = "\(provider.title) — \(host)"
 
-        loadCount += 1
+        // Only trigger auth when we're on the provider's domain
+        let providerHost = provider.loginURL.host ?? ""
+        guard host.hasSuffix(providerHost) || providerHost.hasSuffix(host) else { return }
 
-        // Skip the first load (that's the login page itself)
-        if loadCount <= 1 { return }
+        // Skip if we're on a login/auth page -- user hasn't finished signing in yet
+        let authPaths = ["/login", "/signin", "/sign-in", "/signup", "/sign-up", "/auth", "/oauth"]
+        if authPaths.contains(where: { path.hasPrefix($0) }) { return }
 
-        // After the first navigation completes, the user likely signed in.
-        // Trigger a refresh. Use a flag to avoid spamming.
+        // We're on the provider's domain and not on a login page.
+        // Verify the user actually has a valid session before auto-closing.
         if !hasTriggered {
             hasTriggered = true
-            // Delay slightly to let the page settle after auth redirect
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(2))
-                self.onAuth()
-                // Reset so subsequent navigations can trigger again
+
+                // Check if user is actually authenticated via a quick API probe
+                let authJS: String
+                switch self.provider {
+                case .chatgpt:
+                    authJS = """
+                    var r = await fetch('/api/auth/session');
+                    var s = await r.json();
+                    return (s.accessToken || s.access_token) ? 'yes' : 'no';
+                    """
+                case .claude:
+                    authJS = """
+                    var r = await fetch('/api/account', {credentials: 'include'});
+                    return r.ok ? 'yes' : 'no';
+                    """
+                }
+
+                let result = try? await webView.callAsyncJavaScript(
+                    authJS, arguments: [:], in: nil, contentWorld: .page
+                ) as? String
+
+                if result == "yes" {
+                    self.window?.close()
+                    self.onAuth()
+                }
+
                 try? await Task.sleep(for: .seconds(10))
                 self.hasTriggered = false
             }
