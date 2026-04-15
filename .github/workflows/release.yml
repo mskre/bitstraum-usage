@@ -91,12 +91,14 @@ jobs:
 
       - name: Update Homebrew cask
         env:
+          CHECKOUT_DIR: homebrew-tap
           VERSION: ${{ steps.version.outputs.version }}
           SHA256: ${{ steps.checksum.outputs.sha256 }}
         shell: zsh
         run: |
           ruby <<'RUBY'
-          cask_path = File.join("homebrew-tap", "Casks", "bitstraum-usage.rb")
+          checkout_dir = ENV.fetch("CHECKOUT_DIR")
+          cask_path = File.join(checkout_dir, ENV.fetch("CASK_PATH"))
           version = ENV.fetch("VERSION")
           sha256 = ENV.fetch("SHA256")
           url = "https://github.com/mskre/bitstraum-usage/releases/download/v#{version}/BitstraumUsage-#{version}.zip"
