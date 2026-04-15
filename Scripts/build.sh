@@ -5,9 +5,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUT_DIR="$ROOT/.build"
 OUTPUT_BIN="$OUTPUT_DIR/AIUsageBar"
-APP_DIR="$OUTPUT_DIR/AI Usage Bar.app"
+APP_DIR="$OUTPUT_DIR/Bitstraum Usage.app"
 APP_CONTENTS="$APP_DIR/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -20,8 +21,9 @@ swiftc \
 
 printf "Built %s\n" "$OUTPUT_BIN"
 
-mkdir -p "$APP_MACOS"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$ROOT/Resources/Info.plist" "$APP_CONTENTS/Info.plist"
+cp "$ROOT/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
 cp "$OUTPUT_BIN" "$APP_MACOS/AIUsageBar"
 chmod +x "$APP_MACOS/AIUsageBar"
 

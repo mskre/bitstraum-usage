@@ -43,7 +43,7 @@ struct PopoverView: View {
 
     private var header: some View {
         HStack {
-            Text("Bitstraum Vibbs")
+            Text("Bitstraum Usage")
                 .font(.system(size: 13, weight: .semibold))
             Spacer()
             Button {

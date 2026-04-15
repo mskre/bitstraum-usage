@@ -38,7 +38,7 @@ extension Optional where Wrapped == String {
 enum UsagePersistence {
     private static var storageURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let directory = base.appendingPathComponent("AIUsageBar", isDirectory: true)
+        let directory = base.appendingPathComponent("BitstraumUsage", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent("usage-state.json")
     }
