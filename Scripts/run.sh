@@ -3,5 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-"$ROOT/Scripts/build.sh"
-open "$ROOT/.build/AI Usage Bar.app"
+APP_NAME="Bitstraum Usage.app"
+
+zsh "$ROOT/Scripts/build.sh"
+open "$ROOT/.build/$APP_NAME"

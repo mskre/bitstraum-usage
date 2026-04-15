@@ -1,8 +1,8 @@
-# Browser Authentication Research for AI Usage Bar
+# Browser Authentication Research for Bitstraum Usage
 
 ## Problem Statement
 
-AI Usage Bar uses an embedded `WKWebView` per provider for both sign-in and polling. The webview keeps cookies in `WKWebsiteDataStore.default()` and reuses them for `fetch()` calls. The problem: the embedded browser has no access to the user's password manager (Bitwarden extension, Safari Passwords, Chrome autofill), saved credentials, or existing browser sessions. Signing in is painful.
+Bitstraum Usage uses an embedded `WKWebView` per provider for both sign-in and polling. The webview keeps cookies in `WKWebsiteDataStore.default()` and reuses them for `fetch()` calls. The problem: the embedded browser has no access to the user's password manager (Bitwarden extension, Safari Passwords, Chrome autofill), saved credentials, or existing browser sessions. Signing in is painful.
 
 This document evaluates approaches for using the user's real browser instead.
 

@@ -1,4 +1,4 @@
-# AI Usage Bar
+# Bitstraum Usage
 
 Native macOS menu bar app that shows your AI provider usage limits at a glance.
 
@@ -39,13 +39,33 @@ Gemini and OpenRouter are commented out in the source (no usage counters exposed
 ./Scripts/install.sh
 ```
 
-Installs to `~/Applications/AI Usage Bar.app`.
+Installs to `~/Applications/Bitstraum Usage.app`.
 
 ## Run
 
 ```bash
 ./Scripts/run.sh
 ```
+
+## Homebrew
+
+```bash
+brew tap mskre/tap
+brew install --cask bitstraum-usage
+```
+
+## Releases
+
+Pushing a tag named `vX.Y.Z` from `main` publishes the app automatically:
+
+1. Builds and zips `Bitstraum Usage.app`
+2. Creates a GitHub release in `mskre/bitstraum-usage`
+3. Uploads `BitstraumUsage-X.Y.Z.zip`
+4. Updates `mskre/homebrew-tap/Casks/bitstraum-usage.rb`
+
+Required repository secret:
+
+- `HOMEBREW_TAP_TOKEN` — fine-grained token with Contents read/write access to `mskre/homebrew-tap`
 
 ## Usage
 
