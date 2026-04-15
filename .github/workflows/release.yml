@@ -77,8 +77,13 @@ jobs:
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Verify Homebrew tap token is configured
-        if: ${{ secrets.HOMEBREW_TAP_TOKEN == '' }}
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          if [[ -n "$HOMEBREW_TAP_TOKEN" ]]; then
+            exit 0
+          fi
+
           echo "Missing HOMEBREW_TAP_TOKEN secret for updating mskre/homebrew-tap" >&2
           exit 1
 
