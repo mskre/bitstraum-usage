@@ -1,0 +1,132 @@
+name: Release Bitstraum Usage
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.repository == 'mskre/bitstraum-usage' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    env:
+      TAP_REPOSITORY: mskre/homebrew-tap
+      CASK_PATH: Casks/bitstraum-usage.rb
+
+    steps:
+      - name: Check out app repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag points to main history
+        shell: zsh
+        run: |
+          git fetch origin main --depth=1
+
+          if ! git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main$'; then
+            echo "Release tags must point to a commit already on origin/main" >&2
+            exit 1
+          fi
+
+      - name: Resolve version from tag
+        id: version
+        shell: zsh
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          PLIST_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
+
+          if [[ "$VERSION" != "$PLIST_VERSION" ]]; then
+            printf 'Tag version %s does not match Info.plist version %s\n' "$VERSION" "$PLIST_VERSION" >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "asset_name=BitstraumUsage-${VERSION}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Build release asset
+        shell: zsh
+        run: zsh Scripts/package-release.sh "${{ steps.version.outputs.version }}"
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: zsh
+        run: |
+          ASSET_PATH=".build/${{ steps.version.outputs.asset_name }}"
+
+          if gh release view "${{ steps.version.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "${{ steps.version.outputs.tag }}" "$ASSET_PATH" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "${{ steps.version.outputs.tag }}" "$ASSET_PATH" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Bitstraum Usage ${{ steps.version.outputs.tag }}" \
+              --generate-notes
+          fi
+
+      - name: Calculate artifact checksum
+        id: checksum
+        shell: zsh
+        run: |
+          SHA256=$(shasum -a 256 ".build/${{ steps.version.outputs.asset_name }}" | cut -d ' ' -f 1)
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Homebrew tap token is configured
+        if: ${{ secrets.HOMEBREW_TAP_TOKEN == '' }}
+        run: |
+          echo "Missing HOMEBREW_TAP_TOKEN secret for updating mskre/homebrew-tap" >&2
+          exit 1
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Homebrew cask
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.checksum.outputs.sha256 }}
+        shell: zsh
+        run: |
+          ruby <<'RUBY'
+          cask_path = File.join("homebrew-tap", "Casks", "bitstraum-usage.rb")
+          version = ENV.fetch("VERSION")
+          sha256 = ENV.fetch("SHA256")
+          url = "https://github.com/mskre/bitstraum-usage/releases/download/v#{version}/BitstraumUsage-#{version}.zip"
+
+          content = File.read(cask_path)
+          abort("Missing version stanza") unless content.match?(/^  version ".*"$/)
+          abort("Missing sha256 stanza") unless content.match?(/^  sha256 ".*"$/)
+          abort("Missing url stanza") unless content.match?(/^  url ".*"$/)
+
+          updated = content.sub(/^  version ".*"$/, "  version \"#{version}\"")
+          updated = updated.sub(/^  sha256 ".*"$/, "  sha256 \"#{sha256}\"")
+          updated = updated.sub(/^  url ".*"$/, "  url \"#{url}\"")
+
+          File.write(cask_path, updated)
+          RUBY
+
+      - name: Commit and push tap update
+        working-directory: homebrew-tap
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        shell: zsh
+        run: |
+          if git diff --quiet -- "$CASK_PATH"; then
+            echo "No Homebrew cask changes to commit"
+            exit 0
+          fi
+
+          git add "$CASK_PATH"
+          git commit -m "chore: update bitstraum-usage to ${{ steps.version.outputs.tag }}"
+          git push
