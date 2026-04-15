@@ -103,6 +103,20 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        let closeWindowItem = NSMenuItem(
+            title: "Close Window",
+            action: #selector(NSWindow.performClose(_:)),
+            keyEquivalent: "w"
+        )
+        closeWindowItem.keyEquivalentModifierMask = [.command]
+        windowMenu.addItem(closeWindowItem)
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+
+        NSApplication.shared.windowsMenu = windowMenu
+
         NSApplication.shared.mainMenu = mainMenu
     }
 
