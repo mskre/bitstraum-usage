@@ -30,6 +30,22 @@ final class ColorSettings: ObservableObject {
         didSet { defaults.set(refreshIntervalMinutes, forKey: refreshIntervalKey) }
     }
 
+    @Published var maskSensitiveData: Bool {
+        didSet { defaults.set(maskSensitiveData, forKey: maskSensitiveDataKey) }
+    }
+
+    @Published var showSensitiveInfo: Bool {
+        didSet { defaults.set(showSensitiveInfo, forKey: showSensitiveInfoKey) }
+    }
+
+    @Published var maskPercentage: Double {
+        didSet { defaults.set(maskPercentage, forKey: maskPercentageKey) }
+    }
+
+    @Published var maskDomainOnly: Bool {
+        didSet { defaults.set(maskDomainOnly, forKey: maskDomainOnlyKey) }
+    }
+
     @Published private(set) var appBackgroundColor: NSColor
 
     private let defaults = UserDefaults.standard
@@ -39,6 +55,10 @@ final class ColorSettings: ObservableObject {
     private let rememberViewKey = "rememberLastView"
     private let lastOpenViewKey = "lastOpenView"
     private let refreshIntervalKey = "refreshIntervalMinutes"
+    private let maskSensitiveDataKey = "maskSensitiveData"
+    private let maskPercentageKey = "maskPercentage"
+    private let showSensitiveInfoKey = "showSensitiveInfo"
+    private let maskDomainOnlyKey = "maskDomainOnly"
     private let backgroundColorKey = "appBackgroundColor"
 
     init() {
@@ -62,6 +82,10 @@ final class ColorSettings: ObservableObject {
         self.rememberLastView = defaults.object(forKey: rememberViewKey) as? Bool ?? true
         self.lastOpenView = defaults.string(forKey: lastOpenViewKey) ?? "main"
         self.refreshIntervalMinutes = defaults.object(forKey: refreshIntervalKey) as? Double ?? 5
+        self.maskSensitiveData = defaults.object(forKey: maskSensitiveDataKey) as? Bool ?? false
+        self.showSensitiveInfo = defaults.object(forKey: showSensitiveInfoKey) as? Bool ?? true
+        self.maskPercentage = defaults.object(forKey: maskPercentageKey) as? Double ?? 0.6
+        self.maskDomainOnly = defaults.object(forKey: maskDomainOnlyKey) as? Bool ?? false
         self.appBackgroundColor = NSColor.fromHex(defaults.string(forKey: backgroundColorKey) ?? "") ?? NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1.0)
     }
 
