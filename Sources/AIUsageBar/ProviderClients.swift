@@ -11,9 +11,10 @@ struct ScriptBackedProviderClient: ProviderClient {
     let id: ProviderID
     let script: String
     let navigateTo: URL
+    var waitForDOM: Bool = true
 
     func refresh(using automation: WebAutomationService) async throws -> ProviderUsageCard {
-        let raw = try await automation.evaluateJSON(for: id, at: navigateTo, script: script)
+        let raw = try await automation.evaluateJSON(for: id, at: navigateTo, script: script, waitForDOM: waitForDOM)
         let data = Data(raw.utf8)
         let r: ProviderScrapeResult
         do {
@@ -66,10 +67,10 @@ struct ScriptBackedProviderClient: ProviderClient {
 enum ProviderFactory {
     static func makeAll() -> [ProviderID: any ProviderClient] {
         [
-            .chatgpt: ScriptBackedProviderClient(id: .chatgpt, script: ProviderScripts.chatGPT, navigateTo: ProviderID.chatgpt.usageURL),
+            .chatgpt: ScriptBackedProviderClient(id: .chatgpt, script: ProviderScripts.chatGPT, navigateTo: ProviderID.chatgpt.usageURL, waitForDOM: false),
             .claude: ScriptBackedProviderClient(id: .claude, script: ProviderScripts.claude, navigateTo: ProviderID.claude.usageURL),
-            .gemini: ScriptBackedProviderClient(id: .gemini, script: ProviderScripts.gemini, navigateTo: ProviderID.gemini.usageURL),
-            .openrouter: ScriptBackedProviderClient(id: .openrouter, script: ProviderScripts.openRouter, navigateTo: ProviderID.openrouter.usageURL),
+            // .gemini: ScriptBackedProviderClient(id: .gemini, script: ProviderScripts.gemini, navigateTo: ProviderID.gemini.usageURL),
+            // .openrouter: ScriptBackedProviderClient(id: .openrouter, script: ProviderScripts.openRouter, navigateTo: ProviderID.openrouter.usageURL),
         ]
     }
 }
@@ -90,6 +91,8 @@ enum ProviderScripts {
     /// `fractionFromPct` is a JS expression: either `pct / 100` (for "remaining")
     /// or `(100 - pct) / 100` (for "used").
     private static func domScraper(pctKeywords: String, fractionExpr: String, fallbackPlan: String) -> String {
+        // Double-escaped: Swift \\\\d → string value \\d → JS new RegExp("\\d") → regex \d
+        let pctRegex = "(\\\\d{1,3})\\\\s*%\\\\s*(\(pctKeywords))"
         return """
         try {
           var text = "";
@@ -108,14 +111,18 @@ enum ProviderScripts {
             return JSON.stringify({ authenticated: false, statusMessage: "Sign in required (login page detected)" });
           }
 
-          // Dynamic plan detection from the page title area
-          // Look for "Name (Nx)" multiplier pattern first, then "Xxx plan" but skip
-          // generic words that aren't actual plan names
+          // Dynamic plan detection
           var planName = "\(fallbackPlan)";
-          var pm = text.match(/[A-Za-z]+\\s*\\(\\d+x\\)/);
+          // 1. "Name (Nx)" multiplier pattern -- e.g. "Max (20x)", "Pro (20x)"
+          var pm = text.match(/[A-Za-z]+\\s*\\(\\d+x\\)/i);
           if (pm) { planName = pm[0]; }
-          else {
-            // Match capitalized word + "plan" but skip generic words
+          // 2. "PRO" or "PLUS" or similar standalone uppercase badge
+          if (planName === "\(fallbackPlan)") {
+            pm = text.match(/\\bPRO\\b|\\bPLUS\\b|\\bMAX\\b|\\bTEAM\\b|\\bENTERPRISE\\b|\\bFREE\\b/);
+            if (pm) { planName = pm[0].charAt(0) + pm[0].slice(1).toLowerCase(); }
+          }
+          // 3. "Xxx plan" but skip generic words
+          if (planName === "\(fallbackPlan)") {
             var planMatches = text.match(/\\b[A-Z][a-z]+\\s+plan\\b/g) || [];
             for (var pi = 0; pi < planMatches.length; pi++) {
               var w = planMatches[pi].split(" ")[0].toLowerCase();
@@ -126,34 +133,48 @@ enum ProviderScripts {
           }
 
           var limits = [];
-          var globalPct = new RegExp("(\\\\d{1,3})\\\\s*%\\\\s*(\(pctKeywords))", "gi");
-          var match;
-          while ((match = globalPct.exec(text)) !== null) {
-            var pct = parseInt(match[1], 10);
+          var resetRe = new RegExp("^(tilbakestilles|resets)\\\\b", "i");
+          var pctRe = new RegExp("\(pctRegex)", "i");
+
+          var allLines = text.split("\\n").map(function(l) { return l.trim(); });
+
+          for (var i = 0; i < allLines.length; i++) {
+            var pm = allLines[i].match(pctRe);
+            if (!pm) continue;
+
+            var pct = parseInt(pm[1], 10);
             var fraction = \(fractionExpr);
-            var pos = match.index;
 
-            // Label: nearest non-trivial text line before the match
-            var before = text.substring(Math.max(0, pos - 300), pos);
-            var bLines = before.split("\\n").map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-            var label = "Usage limit";
-            for (var j = bLines.length - 1; j >= 0; j--) {
-              var c = bLines[j];
-              if (c.match(/^\\d+\\s*%/) || c.length < 3) continue;
-              label = c;
-              break;
-            }
-
-            // Reset: nearest line after the match containing time/date keywords
-            var aStart = pos + match[0].length;
-            var after = text.substring(aStart, Math.min(text.length, aStart + 200));
-            var aLines = after.split("\\n").map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+            // Scan backwards: classify each line as reset or title
+            var label = null;
             var resetLabel = null;
-            for (var k = 0; k < aLines.length && k < 3; k++) {
-              if (aLines[k].match(/tilbakestilles|resets?|renews?/i)) { resetLabel = aLines[k]; break; }
+            for (var j = i - 1; j >= 0 && j >= i - 5; j--) {
+              var line = allLines[j];
+              if (line.length < 2) continue;
+              if (line.match(/^\\d{1,3}\\s*%/)) continue;
+              if (resetRe.test(line)) {
+                if (!resetLabel) resetLabel = line;
+                continue;
+              }
+              // Skip known section headers
+              if (line.match(/^(Plan usage|Weekly limit|Additional|Learn more|Last updated|Extra usage)/i)) continue;
+              // First non-reset, non-header line is the title
+              if (!label) { label = line; break; }
             }
 
+            // Also scan forward for reset (ChatGPT puts it after %)
+            if (!resetLabel) {
+              for (var k = i + 1; k < allLines.length && k <= i + 3; k++) {
+                var fwd = allLines[k];
+                if (fwd.length < 2) continue;
+                if (resetRe.test(fwd)) { resetLabel = fwd; break; }
+                if (fwd.match(/^\\d{1,3}\\s*%/)) break;
+              }
+            }
+
+            if (!label) label = "Usage limit";
             var id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 40);
+
             limits.push({
               id: id || ("limit-" + limits.length),
               label: label,
@@ -185,12 +206,124 @@ enum ProviderScripts {
         """
     }
 
-    // ChatGPT: "93% igjen/remaining" → show 7% used (bar fills with usage)
-    static let chatGPT: String = domScraper(
-        pctKeywords: "igjen|remaining|left",
-        fractionExpr: "(100 - pct) / 100",
-        fallbackPlan: "ChatGPT"
-    )
+    // ChatGPT: uses /backend-api/wham/usage which returns structured rate limit data
+    static let chatGPT: String = #"""
+    try {
+      // Get access token
+      var sessionResp = await fetch("https://chatgpt.com/api/auth/session", {
+        credentials: "include"
+      });
+      if (!sessionResp.ok) {
+        return JSON.stringify({ authenticated: false, statusMessage: "ChatGPT session fetch failed" });
+      }
+      var session = await sessionResp.json();
+      var accessToken = session.accessToken || session.access_token;
+      if (!accessToken) {
+        return JSON.stringify({ authenticated: false, statusMessage: "ChatGPT sign-in required" });
+      }
+
+      // Fetch usage data
+      var resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+        credentials: "include",
+        headers: { "Authorization": "Bearer " + accessToken }
+      });
+      if (!resp.ok) {
+        return JSON.stringify({ authenticated: false, statusMessage: "Usage fetch failed: HTTP " + resp.status });
+      }
+
+      var data = await resp.json();
+      var planType = data.plan_type || "ChatGPT";
+      var planName = planType.charAt(0).toUpperCase() + planType.slice(1);
+      if (planName === "Pro") planName = "Pro (20x)";
+
+      var limits = [];
+
+      // Helper to format reset time
+      var formatReset = function(seconds) {
+        if (typeof seconds !== "number" || seconds <= 0) return null;
+        var min = Math.round(seconds / 60);
+        if (min < 60) return "Resets in " + min + " min";
+        var h = Math.floor(min / 60);
+        var m = min % 60;
+        if (h < 24) return "Resets in " + h + "h " + m + "m";
+        var d = Math.floor(h / 24);
+        return "Resets in " + d + "d " + (h % 24) + "h";
+      };
+
+      // Helper to format window label
+      var formatWindow = function(seconds) {
+        if (!seconds) return "";
+        var h = Math.round(seconds / 3600);
+        if (h < 24) return h + "h";
+        var d = Math.round(h / 24);
+        return d + "d";
+      };
+
+      // Primary rate limit
+      var rl = data.rate_limit;
+      if (rl) {
+        var pw = rl.primary_window;
+        if (pw) {
+          limits.push({
+            id: "primary",
+            label: formatWindow(pw.limit_window_seconds) + " limit",
+            remaining: null, total: null,
+            fraction: (pw.used_percent || 0) / 100,
+            resetLabel: formatReset(pw.reset_after_seconds)
+          });
+        }
+        var sw = rl.secondary_window;
+        if (sw) {
+          limits.push({
+            id: "secondary",
+            label: "Weekly limit",
+            remaining: null, total: null,
+            fraction: (sw.used_percent || 0) / 100,
+            resetLabel: formatReset(sw.reset_after_seconds)
+          });
+        }
+      }
+
+      // Additional rate limits (e.g., GPT-5.3-Codex-Spark)
+      var additional = data.additional_rate_limits || [];
+      for (var i = 0; i < additional.length; i++) {
+        var item = additional[i];
+        var name = item.limit_name || "Additional";
+        var arl = item.rate_limit;
+        if (arl) {
+          var apw = arl.primary_window;
+          if (apw) {
+            limits.push({
+              id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-primary",
+              label: name + " " + formatWindow(apw.limit_window_seconds),
+              remaining: null, total: null,
+              fraction: (apw.used_percent || 0) / 100,
+              resetLabel: formatReset(apw.reset_after_seconds)
+            });
+          }
+          var asw = arl.secondary_window;
+          if (asw) {
+            limits.push({
+              id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-secondary",
+              label: name + " Weekly",
+              remaining: null, total: null,
+              fraction: (asw.used_percent || 0) / 100,
+              resetLabel: formatReset(asw.reset_after_seconds)
+            });
+          }
+        }
+      }
+
+      return JSON.stringify({
+        authenticated: true,
+        planName: planName,
+        statusMessage: limits.length > 0 ? "Live" : "No usage data",
+        limits: limits
+      });
+    } catch(e) {
+      return JSON.stringify({ authenticated: false, statusMessage: "Error: " + String(e) });
+    }
+    """#
 
     // Claude: "33% used" → show 33% used (bar fills with usage)
     static let claude: String = domScraper(
