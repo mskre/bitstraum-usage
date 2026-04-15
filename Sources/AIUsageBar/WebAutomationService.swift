@@ -9,6 +9,7 @@ final class WebAutomationService: NSObject {
     private var webViews: [ProviderID: WKWebView] = [:]
     private var signInWindows: [ProviderID: NSWindow] = [:]
     private var signInDelegates: [ProviderID: SignInNavigationDelegate] = [:]
+    private var signInUIDelegates: [ProviderID: SignInUIDelegate] = [:]
     private let dataStore = WKWebsiteDataStore.default()
 
     /// Returns or creates the persistent WKWebView for a provider.
@@ -18,6 +19,7 @@ final class WebAutomationService: NSObject {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = dataStore
         config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
 
         let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700), configuration: config)
         webViews[provider] = wv
@@ -52,10 +54,15 @@ final class WebAutomationService: NSObject {
         wv.autoresizingMask = [.width, .height]
         window.contentView!.addSubview(wv)
 
-        // Watch navigations: detect when user finishes login
-        let delegate = SignInNavigationDelegate(provider: provider, onAuth: onAuth)
+        // Watch navigations: detect when user finishes login + show URL in title
+        let delegate = SignInNavigationDelegate(provider: provider, window: window, onAuth: onAuth)
         signInDelegates[provider] = delegate
         wv.navigationDelegate = delegate
+
+        // UI delegate: enables password autofill popover and SSO popup windows
+        let uiDelegate = SignInUIDelegate(provider: provider)
+        signInUIDelegates[provider] = uiDelegate
+        wv.uiDelegate = uiDelegate
 
         wv.load(URLRequest(url: provider.loginURL))
 
@@ -75,8 +82,10 @@ final class WebAutomationService: NSObject {
                 let wv = self.webView(for: provider)
                 wv.removeFromSuperview()
                 wv.navigationDelegate = nil
+                wv.uiDelegate = nil
                 self.signInWindows.removeValue(forKey: provider)
                 self.signInDelegates.removeValue(forKey: provider)
+                self.signInUIDelegates.removeValue(forKey: provider)
 
                 if self.signInWindows.isEmpty {
                     NSApp.setActivationPolicy(.accessory)
@@ -90,17 +99,22 @@ final class WebAutomationService: NSObject {
 
     /// Signs out from a provider by clearing its cookies/data and destroying its webview.
     func signOut(for provider: ProviderID) async {
+        // Remove from tracking BEFORE closing window to prevent the
+        // willCloseNotification observer from firing a spurious onAuth()
+        signInDelegates.removeValue(forKey: provider)
+        signInUIDelegates.removeValue(forKey: provider)
+
         // Close sign-in window if open
         if let window = signInWindows[provider] {
-            window.close()
             signInWindows.removeValue(forKey: provider)
-            signInDelegates.removeValue(forKey: provider)
+            window.close()
         }
 
         // Remove cached webview
         if let wv = webViews[provider] {
             wv.removeFromSuperview()
             wv.navigationDelegate = nil
+            wv.uiDelegate = nil
             webViews.removeValue(forKey: provider)
         }
 
@@ -170,34 +184,109 @@ final class WebAutomationService: NSObject {
 @MainActor
 final class SignInNavigationDelegate: NSObject, WKNavigationDelegate {
     private let provider: ProviderID
+    private weak var window: NSWindow?
     private let onAuth: () -> Void
     private var hasTriggered = false
     private var loadCount = 0
 
-    init(provider: ProviderID, onAuth: @escaping () -> Void) {
+    init(provider: ProviderID, window: NSWindow, onAuth: @escaping () -> Void) {
         self.provider = provider
+        self.window = window
         self.onAuth = onAuth
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        loadCount += 1
+        // Update window title with current URL
+        guard let url = webView.url else { return }
+        let host = url.host ?? url.absoluteString
+        let path = url.path.lowercased()
+        window?.title = "\(provider.title) — \(host)"
 
-        // Skip the first load (that's the login page itself)
-        if loadCount <= 1 { return }
+        // Only trigger auth when we're on the provider's domain
+        let providerHost = provider.loginURL.host ?? ""
+        guard host.hasSuffix(providerHost) || providerHost.hasSuffix(host) else { return }
 
-        // After the first navigation completes, the user likely signed in.
-        // Trigger a refresh. Use a flag to avoid spamming.
+        // Skip if we're on a login/auth page -- user hasn't finished signing in yet
+        let authPaths = ["/login", "/signin", "/sign-in", "/signup", "/sign-up", "/auth", "/oauth"]
+        if authPaths.contains(where: { path.hasPrefix($0) }) { return }
+
+        // We're on the provider's domain and not on a login page.
+        // Verify the user actually has a valid session before auto-closing.
         if !hasTriggered {
             hasTriggered = true
-            // Delay slightly to let the page settle after auth redirect
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(2))
-                self.onAuth()
-                // Reset so subsequent navigations can trigger again
+
+                // Check if user is actually authenticated via a quick API probe
+                let authJS: String
+                switch self.provider {
+                case .chatgpt:
+                    authJS = """
+                    var r = await fetch('/api/auth/session');
+                    var s = await r.json();
+                    return (s.accessToken || s.access_token) ? 'yes' : 'no';
+                    """
+                case .claude:
+                    authJS = """
+                    var r = await fetch('/api/account', {credentials: 'include'});
+                    return r.ok ? 'yes' : 'no';
+                    """
+                }
+
+                let result = try? await webView.callAsyncJavaScript(
+                    authJS, arguments: [:], in: nil, contentWorld: .page
+                ) as? String
+
+                if result == "yes" {
+                    self.window?.close()
+                    self.onAuth()
+                }
+
                 try? await Task.sleep(for: .seconds(10))
                 self.hasTriggered = false
             }
         }
+    }
+}
+
+// MARK: - UI delegate: password autofill and SSO popup windows
+
+@MainActor
+final class SignInUIDelegate: NSObject, WKUIDelegate {
+    private let provider: ProviderID
+
+    init(provider: ProviderID) {
+        self.provider = provider
+    }
+
+    /// Handle window.open() -- needed for Google/Apple SSO popup flows
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // Load popup URLs in the same webview instead of opening a new window
+        if let url = navigationAction.request.url {
+            webView.load(URLRequest(url: url))
+        }
+        return nil
+    }
+
+    /// Handle JavaScript alert()
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        completionHandler()
+    }
+
+    /// Handle JavaScript confirm()
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn)
     }
 }
 

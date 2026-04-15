@@ -129,6 +129,19 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         store.$isRefreshing
             .sink { [weak self] refreshing in self?.previewView?.isRefreshing = refreshing }
             .store(in: &cancellables)
+
+        NotificationCenter.default.addObserver(
+            forName: .signInCompleted,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                // Small delay to let the sign-in window fully close
+                // and activation policy switch back to .accessory
+                try? await Task.sleep(for: .milliseconds(500))
+                self?.showPanel()
+            }
+        }
     }
 
     // MARK: - Popover
@@ -151,13 +164,18 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
 
     @objc
     private func togglePanel(_ sender: AnyObject?) {
-        guard let button = statusItem.button else { return }
+        guard statusItem.button != nil else { return }
 
         if popover.isShown {
             popover.performClose(sender)
             return
         }
 
+        showPanel()
+    }
+
+    private func showPanel() {
+        guard let button = statusItem.button else { return }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }

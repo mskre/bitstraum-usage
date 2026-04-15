@@ -1,5 +1,9 @@
 import Foundation
 
+extension Notification.Name {
+    static let signInCompleted = Notification.Name("signInCompleted")
+}
+
 enum CurrencyFormatter {
     static let dollars: NumberFormatter = {
         let formatter = NumberFormatter()
