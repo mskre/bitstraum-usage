@@ -10,6 +10,8 @@ final class WebAutomationService: NSObject {
     private var signInWindows: [ProviderID: NSWindow] = [:]
     private var signInDelegates: [ProviderID: SignInNavigationDelegate] = [:]
     private var signInUIDelegates: [ProviderID: SignInUIDelegate] = [:]
+    private var signInCloseObservers: [ProviderID: NSObjectProtocol] = [:]
+    private var suppressedCloseCallbacks = Set<ProviderID>()
     private let dataStore = WKWebsiteDataStore.default()
 
     /// Returns or creates the persistent WKWebView for a provider.
@@ -27,8 +29,8 @@ final class WebAutomationService: NSObject {
     }
 
     /// Opens the persistent WKWebView in a visible window for sign-in.
-    /// `onAuth` is called when sign-in is detected (page navigates away from login).
-    /// Also called when the window is closed.
+    /// `onAuth` is called whenever the sign-in window closes, regardless of whether authentication succeeds.
+    /// Successful authentication automatically closes the window, which then triggers `onAuth`.
     func signIn(for provider: ProviderID, onAuth: @escaping () -> Void) {
         if let existing = signInWindows[provider] {
             NSApp.setActivationPolicy(.regular)
@@ -55,7 +57,7 @@ final class WebAutomationService: NSObject {
         window.contentView!.addSubview(wv)
 
         // Watch navigations: detect when user finishes login + show URL in title
-        let delegate = SignInNavigationDelegate(provider: provider, window: window, onAuth: onAuth)
+        let delegate = SignInNavigationDelegate(provider: provider, window: window)
         signInDelegates[provider] = delegate
         wv.navigationDelegate = delegate
 
@@ -72,42 +74,43 @@ final class WebAutomationService: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
 
-        NotificationCenter.default.addObserver(
+        let closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                let wv = self.webView(for: provider)
-                wv.removeFromSuperview()
-                wv.navigationDelegate = nil
-                wv.uiDelegate = nil
-                self.signInWindows.removeValue(forKey: provider)
-                self.signInDelegates.removeValue(forKey: provider)
-                self.signInUIDelegates.removeValue(forKey: provider)
+                if let wv = self.webViews[provider] {
+                    wv.removeFromSuperview()
+                    wv.navigationDelegate = nil
+                    wv.uiDelegate = nil
+                }
+                self.cleanupSignInSession(for: provider)
 
                 if self.signInWindows.isEmpty {
                     NSApp.setActivationPolicy(.accessory)
                 }
 
+                let shouldNotify = self.suppressedCloseCallbacks.remove(provider) == nil
+                guard shouldNotify else { return }
+
                 try? await Task.sleep(for: .seconds(1))
                 onAuth()
             }
         }
+        signInCloseObservers[provider] = closeObserver
     }
 
     /// Signs out from a provider by clearing its cookies/data and destroying its webview.
     func signOut(for provider: ProviderID) async {
-        // Remove from tracking BEFORE closing window to prevent the
-        // willCloseNotification observer from firing a spurious onAuth()
-        signInDelegates.removeValue(forKey: provider)
-        signInUIDelegates.removeValue(forKey: provider)
-
-        // Close sign-in window if open
+        // Close sign-in window if open; suppress the close observer's
+        // onAuth callback so sign-out doesn't trigger a refresh.
         if let window = signInWindows[provider] {
-            signInWindows.removeValue(forKey: provider)
+            suppressedCloseCallbacks.insert(provider)
             window.close()
+        } else {
+            cleanupSignInSession(for: provider)
         }
 
         // Remove cached webview
@@ -132,6 +135,16 @@ final class WebAutomationService: NSObject {
 
         if signInWindows.isEmpty {
             NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    private func cleanupSignInSession(for provider: ProviderID) {
+        signInWindows.removeValue(forKey: provider)
+        signInDelegates.removeValue(forKey: provider)
+        signInUIDelegates.removeValue(forKey: provider)
+
+        if let observer = signInCloseObservers.removeValue(forKey: provider) {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -185,67 +198,83 @@ final class WebAutomationService: NSObject {
 final class SignInNavigationDelegate: NSObject, WKNavigationDelegate {
     private let provider: ProviderID
     private weak var window: NSWindow?
-    private let onAuth: () -> Void
-    private var hasTriggered = false
-    private var loadCount = 0
+    private weak var webView: WKWebView?
+    private var authMonitorTask: Task<Void, Never>?
 
-    init(provider: ProviderID, window: NSWindow, onAuth: @escaping () -> Void) {
+    init(provider: ProviderID, window: NSWindow) {
         self.provider = provider
         self.window = window
-        self.onAuth = onAuth
+    }
+
+    deinit {
+        authMonitorTask?.cancel()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // Update window title with current URL
+        self.webView = webView
+        updateWindowTitle(for: webView)
+        startAuthMonitorIfNeeded()
+    }
+
+    private func updateWindowTitle(for webView: WKWebView) {
         guard let url = webView.url else { return }
         let host = url.host ?? url.absoluteString
-        let path = url.path.lowercased()
         window?.title = "\(provider.title) — \(host)"
+    }
 
-        // Only trigger auth when we're on the provider's domain
-        let providerHost = provider.loginURL.host ?? ""
-        guard host.hasSuffix(providerHost) || providerHost.hasSuffix(host) else { return }
+    private func startAuthMonitorIfNeeded() {
+        guard authMonitorTask == nil else { return }
 
-        // Skip if we're on a login/auth page -- user hasn't finished signing in yet
-        let authPaths = ["/login", "/signin", "/sign-in", "/signup", "/sign-up", "/auth", "/oauth"]
-        if authPaths.contains(where: { path.hasPrefix($0) }) { return }
-
-        // We're on the provider's domain and not on a login page.
-        // Verify the user actually has a valid session before auto-closing.
-        if !hasTriggered {
-            hasTriggered = true
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(2))
-
-                // Check if user is actually authenticated via a quick API probe
-                let authJS: String
-                switch self.provider {
-                case .chatgpt:
-                    authJS = """
-                    var r = await fetch('/api/auth/session');
-                    var s = await r.json();
-                    return (s.accessToken || s.access_token) ? 'yes' : 'no';
-                    """
-                case .claude:
-                    authJS = """
-                    var r = await fetch('/api/account', {credentials: 'include'});
-                    return r.ok ? 'yes' : 'no';
-                    """
+        authMonitorTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, let webView = self.webView, let window = self.window, window.isVisible else {
+                    return
                 }
 
-                let result = try? await webView.callAsyncJavaScript(
-                    authJS, arguments: [:], in: nil, contentWorld: .page
-                ) as? String
+                self.updateWindowTitle(for: webView)
 
-                if result == "yes" {
-                    self.window?.close()
-                    self.onAuth()
+                if await self.isAuthenticated(in: webView) {
+                    self.authMonitorTask?.cancel()
+                    self.authMonitorTask = nil
+                    window.close()
+                    return
                 }
 
-                try? await Task.sleep(for: .seconds(10))
-                self.hasTriggered = false
+                try? await Task.sleep(for: .seconds(3))
             }
         }
+    }
+
+    private func isAuthenticated(in webView: WKWebView) async -> Bool {
+        guard let host = webView.url?.host else { return false }
+
+        let providerHost = provider.loginURL.host ?? ""
+        guard host.hasSuffix(providerHost) || providerHost.hasSuffix(host) else { return false }
+
+        let authJS: String
+        switch provider {
+        case .chatgpt:
+            authJS = """
+            var r = await fetch('/api/auth/session', {credentials: 'include'});
+            if (!r.ok) return 'no';
+            var s = await r.json();
+            return (s.accessToken || s.access_token) ? 'yes' : 'no';
+            """
+        case .claude:
+            authJS = """
+            var r = await fetch('/api/account', {credentials: 'include'});
+            return r.ok ? 'yes' : 'no';
+            """
+        }
+
+        let result = try? await webView.callAsyncJavaScript(
+            authJS,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+
+        return result == "yes"
     }
 }
 
