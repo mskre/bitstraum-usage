@@ -2,18 +2,15 @@ import AppKit
 import Combine
 import SwiftUI
 
-final class KeyablePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-}
-
 @MainActor
 @main
 final class AIUsageBarMain: NSObject, NSApplicationDelegate {
     private let store = UsageStore()
+    private let colorSettings = ColorSettings.shared
+    private let popoverController = PopoverController()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var previewView: StatusBarPreviewView?
-    private var panel: KeyablePanel?
-    private var eventMonitor: Any?
+    private let popover = NSPopover()
     private var cancellables = Set<AnyCancellable>()
 
     static func main() {
@@ -30,7 +27,6 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configurePanel()
         bindStore()
-        startEventMonitor()
         store.start()
     }
 
@@ -108,7 +104,6 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         store.stop()
-        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
     }
 
     // MARK: - Status item
@@ -123,6 +118,7 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
 
         button.target = self
         button.action = #selector(togglePanel(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         self.previewView = preview
     }
 
@@ -135,74 +131,34 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
-    // MARK: - Liquid Glass Panel
+    // MARK: - Popover
 
     private func configurePanel() {
-        let hostingView = NSHostingView(rootView: PopoverView().environmentObject(store))
-        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        let rootView = PopoverView()
+            .environmentObject(store)
+            .environmentObject(colorSettings)
+            .environmentObject(popoverController)
+        let controller = NSHostingController(rootView: rootView)
+        controller.view.frame.size = controller.view.fittingSize
 
-        let p = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 10),
-            styleMask: [.nonactivatingPanel, .borderless],
-            backing: .buffered,
-            defer: true
-        )
-        p.isFloatingPanel = true
-        p.level = .statusBar
-        p.hasShadow = true
-        p.backgroundColor = .clear
-        p.isOpaque = false
-        p.isMovableByWindowBackground = false
-
-        // Use NSVisualEffectView for native translucent menu-like background
-        let visualEffect = NSVisualEffectView()
-        visualEffect.material = .menu
-        visualEffect.state = .active
-        visualEffect.blendingMode = .behindWindow
-        visualEffect.wantsLayer = true
-        visualEffect.layer?.cornerRadius = 12
-        visualEffect.layer?.masksToBounds = true
-
-        visualEffect.addSubview(hostingView)
-        NSLayoutConstraint.activate([
-            hostingView.leadingAnchor.constraint(equalTo: visualEffect.leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: visualEffect.trailingAnchor),
-            hostingView.topAnchor.constraint(equalTo: visualEffect.topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: visualEffect.bottomAnchor),
-        ])
-
-        p.contentView = visualEffect
-
-        self.panel = p
+        popover.contentViewController = controller
+        popover.behavior = .transient
+        popover.animates = true
+        popoverController.close = { [weak self] in
+            self?.popover.performClose(nil)
+        }
     }
 
     @objc
     private func togglePanel(_ sender: AnyObject?) {
-        guard let panel else { return }
+        guard let button = statusItem.button else { return }
 
-        if panel.isVisible {
-            panel.orderOut(nil)
+        if popover.isShown {
+            popover.performClose(sender)
             return
         }
 
-        guard let button = statusItem.button,
-              let buttonWindow = button.window else { return }
-
-        let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
-        let panelSize = panel.contentView?.fittingSize ?? NSSize(width: 320, height: 400)
-        let x = buttonFrame.midX - panelSize.width / 2
-        let y = buttonFrame.minY - panelSize.height - 4
-
-        panel.setContentSize(panelSize)
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    // MARK: - Event monitor
-
-    private func startEventMonitor() {
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor in self?.panel?.orderOut(nil) }
-        }
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
 }
