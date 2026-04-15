@@ -9,6 +9,7 @@ final class WebAutomationService: NSObject {
     private var webViews: [ProviderID: WKWebView] = [:]
     private var signInWindows: [ProviderID: NSWindow] = [:]
     private var signInDelegates: [ProviderID: SignInNavigationDelegate] = [:]
+    private var signInUIDelegates: [ProviderID: SignInUIDelegate] = [:]
     private let dataStore = WKWebsiteDataStore.default()
 
     /// Returns or creates the persistent WKWebView for a provider.
@@ -52,10 +53,15 @@ final class WebAutomationService: NSObject {
         wv.autoresizingMask = [.width, .height]
         window.contentView!.addSubview(wv)
 
-        // Watch navigations: detect when user finishes login
-        let delegate = SignInNavigationDelegate(provider: provider, onAuth: onAuth)
+        // Watch navigations: detect when user finishes login + show URL in title
+        let delegate = SignInNavigationDelegate(provider: provider, window: window, onAuth: onAuth)
         signInDelegates[provider] = delegate
         wv.navigationDelegate = delegate
+
+        // UI delegate: enables password autofill popover and SSO popup windows
+        let uiDelegate = SignInUIDelegate(provider: provider, signInDelegates: signInDelegates, onAuth: onAuth)
+        signInUIDelegates[provider] = uiDelegate
+        wv.uiDelegate = uiDelegate
 
         wv.load(URLRequest(url: provider.loginURL))
 
@@ -75,8 +81,10 @@ final class WebAutomationService: NSObject {
                 let wv = self.webView(for: provider)
                 wv.removeFromSuperview()
                 wv.navigationDelegate = nil
+                wv.uiDelegate = nil
                 self.signInWindows.removeValue(forKey: provider)
                 self.signInDelegates.removeValue(forKey: provider)
+                self.signInUIDelegates.removeValue(forKey: provider)
 
                 if self.signInWindows.isEmpty {
                     NSApp.setActivationPolicy(.accessory)
@@ -170,16 +178,24 @@ final class WebAutomationService: NSObject {
 @MainActor
 final class SignInNavigationDelegate: NSObject, WKNavigationDelegate {
     private let provider: ProviderID
+    private weak var window: NSWindow?
     private let onAuth: () -> Void
     private var hasTriggered = false
     private var loadCount = 0
 
-    init(provider: ProviderID, onAuth: @escaping () -> Void) {
+    init(provider: ProviderID, window: NSWindow, onAuth: @escaping () -> Void) {
         self.provider = provider
+        self.window = window
         self.onAuth = onAuth
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // Update window title with current URL
+        if let url = webView.url {
+            let host = url.host ?? url.absoluteString
+            window?.title = "\(provider.title) — \(host)"
+        }
+
         loadCount += 1
 
         // Skip the first load (that's the login page itself)
@@ -198,6 +214,51 @@ final class SignInNavigationDelegate: NSObject, WKNavigationDelegate {
                 self.hasTriggered = false
             }
         }
+    }
+}
+
+// MARK: - UI delegate: password autofill and SSO popup windows
+
+@MainActor
+final class SignInUIDelegate: NSObject, WKUIDelegate {
+    private let provider: ProviderID
+    private let signInDelegates: [ProviderID: SignInNavigationDelegate]
+    private let onAuth: () -> Void
+
+    init(provider: ProviderID, signInDelegates: [ProviderID: SignInNavigationDelegate], onAuth: @escaping () -> Void) {
+        self.provider = provider
+        self.signInDelegates = signInDelegates
+        self.onAuth = onAuth
+    }
+
+    /// Handle window.open() -- needed for Google/Apple SSO popup flows
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // Load popup URLs in the same webview instead of opening a new window
+        if let url = navigationAction.request.url {
+            webView.load(URLRequest(url: url))
+        }
+        return nil
+    }
+
+    /// Handle JavaScript alert()
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        completionHandler()
+    }
+
+    /// Handle JavaScript confirm()
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn)
     }
 }
 
