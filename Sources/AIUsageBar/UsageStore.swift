@@ -9,6 +9,7 @@ final class UsageStore: ObservableObject {
 
     private let automation = WebAutomationService()
     private let clients = ProviderFactory.makeAll()
+    private let colorSettings = ColorSettings.shared
     private var refreshTask: Task<Void, Never>?
 
     init() {
@@ -26,7 +27,8 @@ final class UsageStore: ObservableObject {
             // Refresh all authenticated providers on launch
             await self?.refreshAuthenticated()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(300))
+                let interval = max(1, Int((self?.colorSettings.refreshIntervalMinutes ?? 5).rounded()))
+                try? await Task.sleep(for: .seconds(interval * 60))
                 await self?.refreshAuthenticated()
             }
         }

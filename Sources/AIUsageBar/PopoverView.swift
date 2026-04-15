@@ -49,7 +49,34 @@ struct PopoverView: View {
         }
         .padding(.vertical, 4)
         .frame(width: showSettings ? 360 : 310)
+        .background(Color(nsColor: colorSettings.appBackgroundColor))
+        .onAppear {
+            showSettings = colorSettings.rememberLastView && colorSettings.lastOpenView == "settings"
+        }
         .onReceive(timer) { self.now = $0 }
+        .onChange(of: showSettings) {
+            if colorSettings.rememberLastView {
+                colorSettings.lastOpenView = showSettings ? "settings" : "main"
+            }
+        }
+        .onChange(of: colorSettings.rememberLastView) {
+            if !colorSettings.rememberLastView {
+                showSettings = false
+                colorSettings.lastOpenView = "main"
+            }
+        }
+        .onChange(of: popoverController.closeCount) {
+            if !colorSettings.rememberLastView {
+                showSettings = false
+                colorSettings.lastOpenView = "main"
+            }
+        }
+        .onDisappear {
+            if !colorSettings.rememberLastView {
+                showSettings = false
+                colorSettings.lastOpenView = "main"
+            }
+        }
         .onHover { hovering in
             guard colorSettings.dismissOnMouseExit else { return }
             if hovering {
@@ -263,11 +290,14 @@ struct LimitRowView: View {
 struct ColorSettingsView: View {
     @EnvironmentObject private var colorSettings: ColorSettings
     @State private var expandedProvider: ProviderID?
+    @State private var backgroundExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Bar Colors")
                 .font(.system(size: 12, weight: .semibold))
+
+            BackgroundColorRow(expanded: $backgroundExpanded)
 
             ForEach(ProviderID.allCases) { provider in
                 HexColorRow(provider: provider, expandedProvider: $expandedProvider)
@@ -281,6 +311,34 @@ struct ColorSettingsView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.mini)
+
+            Toggle(isOn: $colorSettings.colorizeStatusIcon) {
+                Text("Use custom colors in menu bar icon")
+                    .font(.system(size: 12))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+
+            Toggle(isOn: $colorSettings.rememberLastView) {
+                Text("Remember last open view")
+                    .font(.system(size: 12))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Refresh interval")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Text("\(Int(colorSettings.refreshIntervalMinutes.rounded())) min")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Slider(value: $colorSettings.refreshIntervalMinutes, in: 1...30, step: 1)
+                    .controlSize(.mini)
+            }
 
             HStack {
                 Spacer()
@@ -304,6 +362,7 @@ struct HexColorRow: View {
     @State private var saturation: Double = 0
     @State private var brightness: Double = 1
     @State private var isInteracting = false
+    @State private var isSyncingHexFromPreview = false
 
     private var isExpanded: Bool { expandedProvider == provider }
     private var previewColor: NSColor {
@@ -344,7 +403,7 @@ struct HexColorRow: View {
                     CircularColorPicker(
                         hue: $hue,
                         saturation: $saturation,
-                        brightness: brightness,
+                        brightness: 1,
                         onInteractionChanged: handleInteraction
                     )
                         .frame(width: 190, height: 190)
@@ -385,6 +444,10 @@ struct HexColorRow: View {
             if !isInteracting { syncFromSettings() }
         }
         .onChange(of: hexText) {
+            if isSyncingHexFromPreview {
+                isSyncingHexFromPreview = false
+                return
+            }
             let filtered = String(hexText.uppercased().filter { "0123456789ABCDEF".contains($0) }.prefix(6))
             if filtered != hexText {
                 hexText = filtered
@@ -393,9 +456,9 @@ struct HexColorRow: View {
             guard filtered.count == 6, let color = NSColor.fromHex(filtered) else { return }
             apply(color)
         }
-        .onChange(of: hue) { syncHexFromPreview() }
-        .onChange(of: saturation) { syncHexFromPreview() }
-        .onChange(of: brightness) { syncHexFromPreview() }
+        .onChange(of: hue) { if !isInteracting { syncHexFromPreview() } }
+        .onChange(of: saturation) { if !isInteracting { syncHexFromPreview() } }
+        .onChange(of: brightness) { if !isInteracting { syncHexFromPreview() } }
     }
 
     private func syncFromSettings() {
@@ -403,6 +466,7 @@ struct HexColorRow: View {
         hue = color.hue
         saturation = color.saturation
         brightness = color.brightness
+        isSyncingHexFromPreview = true
         hexText = colorSettings.color(for: provider).toHex().replacingOccurrences(of: "#", with: "")
     }
 
@@ -420,13 +484,154 @@ struct HexColorRow: View {
 
     private func syncHexFromPreview() {
         let nextHex = previewColor.toHex().replacingOccurrences(of: "#", with: "")
-        if hexText != nextHex { hexText = nextHex }
+        if hexText != nextHex {
+            isSyncingHexFromPreview = true
+            hexText = nextHex
+        }
     }
 
     private func handleInteraction(_ editing: Bool) {
         isInteracting = editing
         if !editing {
+            syncHexFromPreview()
             colorSettings.setColor(previewColor, for: provider)
+        }
+    }
+}
+
+struct BackgroundColorRow: View {
+    @Binding var expanded: Bool
+    @EnvironmentObject private var colorSettings: ColorSettings
+    @State private var hexText = ""
+    @State private var hue: Double = 0
+    @State private var saturation: Double = 0
+    @State private var brightness: Double = 1
+    @State private var isInteracting = false
+    @State private var isSyncingHexFromPreview = false
+
+    private var previewColor: NSColor {
+        NSColor(calibratedHue: hue, saturation: saturation, brightness: brightness, alpha: 1.0)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        expanded.toggle()
+                    }
+                } label: {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color(nsColor: previewColor))
+                        .frame(width: 20, height: 20)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(.white.opacity(0.2), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.borderless)
+
+                Text("Background")
+                    .font(.system(size: 12))
+
+                Spacer()
+
+                Text("#\(hexText)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 64, alignment: .leading)
+            }
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    CircularColorPicker(hue: $hue, saturation: $saturation, brightness: 1, onInteractionChanged: handleInteraction)
+                        .frame(width: 190, height: 190)
+
+                    HStack(spacing: 6) {
+                        Text("Hex")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, alignment: .leading)
+
+                        HStack(spacing: 2) {
+                            Text("#")
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary)
+
+                            HexTextField(text: $hexText)
+                                .frame(width: 64, height: 16)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(.white.opacity(0.07))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(.white.opacity(0.15), lineWidth: 1)
+                        )
+                    }
+
+                    BrightnessSliderRow(value: $brightness, hue: hue, saturation: saturation, onEditingChanged: handleInteraction)
+                }
+                .padding(.leading, 28)
+            }
+        }
+        .onAppear { syncFromSettings() }
+        .onChange(of: colorSettings.appBackgroundColor) {
+            if !isInteracting { syncFromSettings() }
+        }
+        .onChange(of: hexText) {
+            if isSyncingHexFromPreview {
+                isSyncingHexFromPreview = false
+                return
+            }
+            let filtered = String(hexText.uppercased().filter { "0123456789ABCDEF".contains($0) }.prefix(6))
+            if filtered != hexText {
+                hexText = filtered
+                return
+            }
+            guard filtered.count == 6, let color = NSColor.fromHex(filtered) else { return }
+            apply(color)
+        }
+        .onChange(of: hue) { if !isInteracting { syncHexFromPreview() } }
+        .onChange(of: saturation) { if !isInteracting { syncHexFromPreview() } }
+        .onChange(of: brightness) { if !isInteracting { syncHexFromPreview() } }
+    }
+
+    private func syncFromSettings() {
+        let color = colorSettings.appBackgroundColor.hsbComponents
+        hue = color.hue
+        saturation = color.saturation
+        brightness = color.brightness
+        isSyncingHexFromPreview = true
+        hexText = colorSettings.appBackgroundColor.toHex().replacingOccurrences(of: "#", with: "")
+    }
+
+    private func apply(_ color: NSColor) {
+        colorSettings.setAppBackgroundColor(color)
+        let components = color.hsbComponents
+        hue = components.hue
+        saturation = components.saturation
+        brightness = components.brightness
+        let nextHex = color.toHex().replacingOccurrences(of: "#", with: "")
+        if hexText != nextHex { hexText = nextHex }
+    }
+
+    private func syncHexFromPreview() {
+        let nextHex = previewColor.toHex().replacingOccurrences(of: "#", with: "")
+        if hexText != nextHex {
+            isSyncingHexFromPreview = true
+            hexText = nextHex
+        }
+    }
+
+    private func handleInteraction(_ editing: Bool) {
+        isInteracting = editing
+        if !editing {
+            syncHexFromPreview()
+            colorSettings.setAppBackgroundColor(previewColor)
         }
     }
 }
@@ -447,6 +652,8 @@ struct CircularColorPicker: View {
             ZStack {
                 Image(nsImage: ColorWheelImageCache.image(diameter: Int(size), brightness: brightness))
                     .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
                     .frame(width: size, height: size)
 
                 Circle()
@@ -499,8 +706,57 @@ struct BrightnessSliderRow: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
-            Slider(value: $value, in: 0...1, onEditingChanged: onEditingChanged)
-                .tint(Color(nsColor: NSColor(calibratedHue: hue, saturation: saturation, brightness: max(value, 0.15), alpha: 1.0)))
+            CustomBrightnessSlider(value: $value, hue: hue, saturation: saturation, onEditingChanged: onEditingChanged)
+                .frame(height: 22)
+        }
+    }
+}
+
+struct CustomBrightnessSlider: View {
+    @Binding var value: Double
+    let hue: Double
+    let saturation: Double
+    let onEditingChanged: (Bool) -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let knobSize: CGFloat = 18
+            let usableWidth = max(geo.size.width - knobSize, 1)
+            let knobX = knobSize / 2 + usableWidth * value
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.black,
+                                Color(nsColor: NSColor(calibratedHue: hue, saturation: saturation, brightness: 1.0, alpha: 1.0))
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(height: 8)
+
+                Circle()
+                    .fill(Color(nsColor: NSColor(calibratedHue: hue, saturation: saturation, brightness: max(value, 0.05), alpha: 1.0)))
+                    .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1))
+                    .frame(width: knobSize, height: knobSize)
+                    .position(x: knobX, y: geo.size.height / 2)
+                    .shadow(color: .black.opacity(0.25), radius: 2)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        onEditingChanged(true)
+                        let x = min(max(gesture.location.x - knobSize / 2, 0), usableWidth)
+                        value = x / usableWidth
+                    }
+                    .onEnded { _ in
+                        onEditingChanged(false)
+                    }
+            )
         }
     }
 }
@@ -509,13 +765,15 @@ enum ColorWheelImageCache {
     private static var images: [String: NSImage] = [:]
 
     static func image(diameter: Int, brightness: Double) -> NSImage {
-        let key = "\(diameter)-\(Int((brightness * 1000).rounded()))"
+        let scale = max(2, Int((NSScreen.main?.backingScaleFactor ?? 2).rounded()) * 2)
+        let pixelDiameter = diameter * scale
+        let key = "\(pixelDiameter)-\(Int((brightness * 1000).rounded()))"
         if let cached = images[key] { return cached }
 
         let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
-            pixelsWide: diameter,
-            pixelsHigh: diameter,
+            pixelsWide: pixelDiameter,
+            pixelsHigh: pixelDiameter,
             bitsPerSample: 8,
             samplesPerPixel: 4,
             hasAlpha: true,
@@ -525,14 +783,14 @@ enum ColorWheelImageCache {
             bitsPerPixel: 0
         )!
 
-        let radius = Double(diameter) / 2
+        let radius = Double(pixelDiameter) / 2
         let center = radius
-        for y in 0..<diameter {
-            for x in 0..<diameter {
+        for y in 0..<pixelDiameter {
+            for x in 0..<pixelDiameter {
                 let dx = Double(x) + 0.5 - center
                 let dy = Double(y) + 0.5 - center
                 let distance = sqrt(dx * dx + dy * dy)
-                if distance > radius {
+                if distance > radius + 1 {
                     rep.setColor(.clear, atX: x, y: y)
                     continue
                 }
@@ -541,7 +799,8 @@ enum ColorWheelImageCache {
                 var angle = atan2(dy, dx) + (.pi / 2)
                 if angle < 0 { angle += .pi * 2 }
                 let hue = angle / (.pi * 2)
-                let color = NSColor(calibratedHue: hue, saturation: saturation, brightness: brightness, alpha: 1.0)
+                let alpha = max(0, min(1, radius + 0.5 - distance))
+                let color = NSColor(calibratedHue: hue, saturation: min(saturation, 1), brightness: brightness, alpha: alpha)
                 rep.setColor(color, atX: x, y: y)
             }
         }

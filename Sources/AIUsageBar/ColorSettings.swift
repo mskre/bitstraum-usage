@@ -11,9 +11,35 @@ final class ColorSettings: ObservableObject {
         didSet { defaults.set(dismissOnMouseExit, forKey: dismissKey) }
     }
 
+    @Published var colorizeStatusIcon: Bool {
+        didSet { defaults.set(colorizeStatusIcon, forKey: colorizeIconKey) }
+    }
+
+    @Published var rememberLastView: Bool {
+        didSet { defaults.set(rememberLastView, forKey: rememberViewKey) }
+    }
+
+    @Published var lastOpenView: String {
+        didSet {
+            guard rememberLastView else { return }
+            defaults.set(lastOpenView, forKey: lastOpenViewKey)
+        }
+    }
+
+    @Published var refreshIntervalMinutes: Double {
+        didSet { defaults.set(refreshIntervalMinutes, forKey: refreshIntervalKey) }
+    }
+
+    @Published private(set) var appBackgroundColor: NSColor
+
     private let defaults = UserDefaults.standard
     private let storageKey = "providerColors"
     private let dismissKey = "dismissOnMouseExit"
+    private let colorizeIconKey = "colorizeStatusIcon"
+    private let rememberViewKey = "rememberLastView"
+    private let lastOpenViewKey = "lastOpenView"
+    private let refreshIntervalKey = "refreshIntervalMinutes"
+    private let backgroundColorKey = "appBackgroundColor"
 
     init() {
         var colors: [ProviderID: NSColor] = [:]
@@ -32,6 +58,11 @@ final class ColorSettings: ObservableObject {
         }
         self.providerColors = colors
         self.dismissOnMouseExit = defaults.object(forKey: dismissKey) as? Bool ?? false
+        self.colorizeStatusIcon = defaults.object(forKey: colorizeIconKey) as? Bool ?? true
+        self.rememberLastView = defaults.object(forKey: rememberViewKey) as? Bool ?? true
+        self.lastOpenView = defaults.string(forKey: lastOpenViewKey) ?? "main"
+        self.refreshIntervalMinutes = defaults.object(forKey: refreshIntervalKey) as? Double ?? 5
+        self.appBackgroundColor = NSColor.fromHex(defaults.string(forKey: backgroundColorKey) ?? "") ?? NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1.0)
     }
 
     func color(for provider: ProviderID) -> NSColor {
@@ -53,7 +84,16 @@ final class ColorSettings: ObservableObject {
         for provider in ProviderID.allCases {
             providerColors[provider] = provider.defaultAccentColor
         }
+        appBackgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1.0)
+        defaults.set(appBackgroundColor.toHex(), forKey: backgroundColorKey)
         save()
+    }
+
+    func setAppBackgroundColor(_ color: NSColor) {
+        let normalized = color.toHex()
+        if appBackgroundColor.toHex() == normalized { return }
+        appBackgroundColor = color
+        defaults.set(normalized, forKey: backgroundColorKey)
     }
 
     private func save() {
