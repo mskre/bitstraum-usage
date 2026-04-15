@@ -23,6 +23,8 @@ final class UsageStore: ObservableObject {
     func start() {
         guard refreshTask == nil else { return }
         refreshTask = Task { [weak self] in
+            // Refresh all authenticated providers on launch
+            await self?.refreshAuthenticated()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(300))
                 await self?.refreshAuthenticated()
@@ -123,6 +125,11 @@ final class UsageStore: ObservableObject {
 
     private func replace(_ card: ProviderUsageCard) {
         if let i = cards.firstIndex(where: { $0.id == card.id }) { cards[i] = card }
+        // Debug: write status to file for providers with no limits
+        if card.limits.isEmpty && card.authenticated {
+            let debugPath = "/tmp/ai_usage_debug_\(card.id.rawValue).json"
+            try? card.statusMessage.write(toFile: debugPath, atomically: true, encoding: .utf8)
+        }
     }
 
     private func update(_ provider: ProviderID, transform: (inout ProviderUsageCard) -> Void) {
