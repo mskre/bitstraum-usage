@@ -173,6 +173,7 @@ struct ProviderCardView: View {
     let color: Color
     let signInAction: () -> Void
     let signOutAction: () -> Void
+    @EnvironmentObject private var colorSettings: ColorSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -200,8 +201,8 @@ struct ProviderCardView: View {
                 }
             }
 
-            if let email = card.email {
-                Text(email)
+            if colorSettings.showSensitiveInfo, let email = card.email {
+                Text(displayEmail(email))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -240,6 +241,11 @@ struct ProviderCardView: View {
         default:
             EmptyView()
         }
+    }
+
+    private func displayEmail(_ email: String) -> String {
+        guard colorSettings.maskSensitiveData else { return email }
+        return maskEmail(email, percentage: colorSettings.maskPercentage, domainOnly: colorSettings.maskDomainOnly)
     }
 }
 
@@ -289,8 +295,18 @@ struct LimitRowView: View {
 
 struct ColorSettingsView: View {
     @EnvironmentObject private var colorSettings: ColorSettings
+    @EnvironmentObject private var store: UsageStore
     @State private var expandedProvider: ProviderID?
     @State private var backgroundExpanded = false
+
+    private var sampleEmail: String {
+        store.cards.compactMap(\.email).first ?? "name@example.com"
+    }
+
+    private var previewEmailText: String {
+        guard colorSettings.showSensitiveInfo else { return "Hidden" }
+        return colorSettings.maskSensitiveData ? maskEmail(sampleEmail, percentage: colorSettings.maskPercentage, domainOnly: colorSettings.maskDomainOnly) : sampleEmail
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -325,6 +341,55 @@ struct ColorSettingsView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.mini)
+
+            Toggle(isOn: $colorSettings.maskSensitiveData) {
+                Text("Mask emails")
+                    .font(.system(size: 12))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+
+            Toggle(isOn: $colorSettings.maskDomainOnly) {
+                Text("Only mask domain after @")
+                    .font(.system(size: 12))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .disabled(!colorSettings.maskSensitiveData || !colorSettings.showSensitiveInfo)
+
+            Toggle(isOn: $colorSettings.showSensitiveInfo) {
+                Text("Show emails / sensitive info")
+                    .font(.system(size: 12))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Mask amount")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Text("\(Int((colorSettings.maskPercentage * 100).rounded()))%")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Slider(value: $colorSettings.maskPercentage, in: 0...1, step: 0.05)
+                    .controlSize(.mini)
+                    .disabled(!colorSettings.maskSensitiveData || !colorSettings.showSensitiveInfo)
+
+                HStack(spacing: 6) {
+                    Text("Preview")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    Text(previewEmailText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -870,4 +935,33 @@ private extension NSColor {
         color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
         return (Double(hue), Double(saturation), Double(brightness))
     }
+}
+
+private func maskEmail(_ email: String, percentage: Double, domainOnly: Bool) -> String {
+    let parts = email.split(separator: "@", maxSplits: 1).map(String.init)
+    guard parts.count == 2 else { return email }
+
+    let local = parts[0]
+    let domain = parts[1]
+    let domainParts = domain.split(separator: ".", maxSplits: 1).map(String.init)
+
+    let maskedLocal = domainOnly ? local : maskSegment(local, percentage: percentage)
+    let maskedDomainName = domainParts.isEmpty ? maskSegment(domain, percentage: percentage) : maskSegment(domainParts[0], percentage: percentage)
+    let suffix = domainParts.count == 2 ? ".\(domainParts[1])" : ""
+    return "\(maskedLocal)@\(maskedDomainName)\(suffix)"
+}
+
+private func maskSegment(_ segment: String, percentage: Double) -> String {
+    guard !segment.isEmpty else { return segment }
+    let chars = Array(segment)
+    let count = chars.count
+    let maskCount = min(max(Int((Double(count) * percentage).rounded()), 0), max(0, count - 1))
+    let visibleCount = max(1, count - maskCount)
+    let prefixCount = max(1, visibleCount / 2)
+    let suffixCount = max(0, visibleCount - prefixCount)
+
+    let prefix = String(chars.prefix(prefixCount))
+    let suffix = suffixCount > 0 ? String(chars.suffix(suffixCount)) : ""
+    let middleCount = max(0, count - prefixCount - suffixCount)
+    return prefix + String(repeating: "*", count: middleCount) + suffix
 }
