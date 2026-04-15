@@ -19,6 +19,7 @@ final class WebAutomationService: NSObject {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = dataStore
         config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
 
         let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700), configuration: config)
         webViews[provider] = wv
@@ -59,7 +60,7 @@ final class WebAutomationService: NSObject {
         wv.navigationDelegate = delegate
 
         // UI delegate: enables password autofill popover and SSO popup windows
-        let uiDelegate = SignInUIDelegate(provider: provider, signInDelegates: signInDelegates, onAuth: onAuth)
+        let uiDelegate = SignInUIDelegate(provider: provider)
         signInUIDelegates[provider] = uiDelegate
         wv.uiDelegate = uiDelegate
 
@@ -98,17 +99,22 @@ final class WebAutomationService: NSObject {
 
     /// Signs out from a provider by clearing its cookies/data and destroying its webview.
     func signOut(for provider: ProviderID) async {
+        // Remove from tracking BEFORE closing window to prevent the
+        // willCloseNotification observer from firing a spurious onAuth()
+        signInDelegates.removeValue(forKey: provider)
+        signInUIDelegates.removeValue(forKey: provider)
+
         // Close sign-in window if open
         if let window = signInWindows[provider] {
-            window.close()
             signInWindows.removeValue(forKey: provider)
-            signInDelegates.removeValue(forKey: provider)
+            window.close()
         }
 
         // Remove cached webview
         if let wv = webViews[provider] {
             wv.removeFromSuperview()
             wv.navigationDelegate = nil
+            wv.uiDelegate = nil
             webViews.removeValue(forKey: provider)
         }
 
@@ -222,13 +228,9 @@ final class SignInNavigationDelegate: NSObject, WKNavigationDelegate {
 @MainActor
 final class SignInUIDelegate: NSObject, WKUIDelegate {
     private let provider: ProviderID
-    private let signInDelegates: [ProviderID: SignInNavigationDelegate]
-    private let onAuth: () -> Void
 
-    init(provider: ProviderID, signInDelegates: [ProviderID: SignInNavigationDelegate], onAuth: @escaping () -> Void) {
+    init(provider: ProviderID) {
         self.provider = provider
-        self.signInDelegates = signInDelegates
-        self.onAuth = onAuth
     }
 
     /// Handle window.open() -- needed for Google/Apple SSO popup flows
