@@ -25,12 +25,15 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    var accentColor: NSColor {
+    var defaultAccentColor: NSColor {
         switch self {
         case .chatgpt: return NSColor(white: 0.95, alpha: 1.0)
         case .claude: return NSColor(calibratedRed: 0.95, green: 0.50, blue: 0.19, alpha: 1.0)
         }
     }
+
+    /// Alias kept for compatibility; views should prefer ColorSettings for user-customized colors.
+    var accentColor: NSColor { defaultAccentColor }
 
     var loginURL: URL {
         switch self {
