@@ -25,12 +25,61 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        configureAppIcon()
         configureMainMenu()
         configureStatusItem()
         configurePanel()
         bindStore()
         startEventMonitor()
         store.start()
+    }
+
+    private func configureAppIcon() {
+        let size: CGFloat = 256
+        let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            // Background rounded rect
+            let bgPath = NSBezierPath(roundedRect: rect.insetBy(dx: 8, dy: 8), xRadius: 48, yRadius: 48)
+            NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.14, alpha: 1.0).setFill()
+            bgPath.fill()
+
+            // Draw three usage bars
+            let barColors: [NSColor] = [
+                NSColor(calibratedRed: 0.95, green: 0.50, blue: 0.19, alpha: 1.0), // orange
+                .white,
+                NSColor(calibratedRed: 0.45, green: 0.45, blue: 0.50, alpha: 1.0), // gray
+            ]
+            let fills: [CGFloat] = [0.65, 0.40, 0.20]
+            let barH: CGFloat = 28
+            let barGap: CGFloat = 20
+            let barInset: CGFloat = 44.0
+            let totalBarsH = CGFloat(barColors.count) * barH + CGFloat(barColors.count - 1) * barGap
+            let startY = (size - totalBarsH) / 2
+
+            for (i, color) in barColors.enumerated() {
+                let y = startY + CGFloat(barColors.count - 1 - i) * (barH + barGap)
+                let barRect = NSRect(x: barInset, y: y, width: size - barInset * 2, height: barH)
+                let radius = barH / 2
+
+                // Track
+                let track = NSBezierPath(roundedRect: barRect, xRadius: radius, yRadius: radius)
+                NSColor.white.withAlphaComponent(0.1).setFill()
+                track.fill()
+
+                // Fill
+                let fillW = max(barH, barRect.width * fills[i])
+                let fillRect = NSRect(x: barRect.minX, y: barRect.minY, width: fillW, height: barH)
+
+                NSGraphicsContext.saveGraphicsState()
+                let clip = NSBezierPath(roundedRect: barRect, xRadius: radius, yRadius: radius)
+                clip.addClip()
+                color.setFill()
+                NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius).fill()
+                NSGraphicsContext.restoreGraphicsState()
+            }
+
+            return true
+        }
+        NSApp.applicationIconImage = image
     }
 
     private func configureMainMenu() {

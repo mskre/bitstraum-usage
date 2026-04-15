@@ -48,6 +48,14 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    func signOut(from provider: ProviderID) async {
+        await automation.signOut(for: provider)
+        if let i = cards.firstIndex(where: { $0.id == provider }) {
+            cards[i] = ProviderUsageCard.placeholder(for: provider)
+        }
+        UsagePersistence.save(cards)
+    }
+
     func refreshSingle(_ provider: ProviderID) async {
         await refresh(provider: provider)
         lastRefresh = Date()

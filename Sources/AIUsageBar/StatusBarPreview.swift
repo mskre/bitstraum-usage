@@ -2,11 +2,18 @@ import AppKit
 
 final class StatusBarPreviewView: NSView {
     var cards: [ProviderUsageCard] = [] {
-        didSet { updateIcon() }
+        didSet {
+            // Cache fractions from non-loading states so the icon doesn't flicker
+            for card in cards where card.state != .loading {
+                lastKnownFractions[card.id] = sessionFraction(card: card, useCache: false)
+            }
+            updateIcon()
+        }
     }
     var isRefreshing: Bool = false {
         didSet { updateIcon() }
     }
+    private var lastKnownFractions: [ProviderID: CGFloat] = [:]
 
     private weak var button: NSStatusBarButton?
 
@@ -77,9 +84,13 @@ final class StatusBarPreviewView: NSView {
         button.imagePosition = .imageOnly
     }
 
-    private func sessionFraction(card: ProviderUsageCard?) -> CGFloat {
+    private func sessionFraction(card: ProviderUsageCard?, useCache: Bool = true) -> CGFloat {
         guard let card, card.authenticated else { return 0 }
-        if isRefreshing && card.state == .loading { return 0.5 }
+
+        // During loading, keep the last known fraction so the icon doesn't flicker
+        if card.state == .loading, useCache, let cached = lastKnownFractions[card.id] {
+            return cached
+        }
 
         if let first = card.limits.first, let f = first.fraction {
             return CGFloat(f.bounded(to: 0...1))
@@ -91,7 +102,7 @@ final class StatusBarPreviewView: NSView {
 
         switch card.state {
         case .ready: return 0.0
-        case .loading: return 0.5
+        case .loading: return lastKnownFractions[card.id] ?? 0
         default: return 0
         }
     }

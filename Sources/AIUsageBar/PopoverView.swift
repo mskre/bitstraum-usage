@@ -15,9 +15,13 @@ struct PopoverView: View {
             Divider().opacity(0.3)
 
             ForEach(store.cards) { card in
-                ProviderCardView(card: card) {
+                ProviderCardView(card: card, signInAction: {
+                    // Dismiss the dropdown before opening the sign-in window
+                    NSApp.keyWindow?.orderOut(nil)
                     store.signIn(to: card.id)
-                }
+                }, signOutAction: {
+                    Task { await store.signOut(from: card.id) }
+                })
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
 
@@ -52,7 +56,7 @@ struct PopoverView: View {
                 } else {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.white)
                 }
             }
             .buttonStyle(.borderless)
@@ -84,6 +88,7 @@ struct PopoverView: View {
 struct ProviderCardView: View {
     let card: ProviderUsageCard
     let signInAction: () -> Void
+    let signOutAction: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -109,6 +114,12 @@ struct ProviderCardView: View {
                 } else {
                     statusLabel
                 }
+            }
+
+            if let email = card.email {
+                Text(email)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
 
             if card.limits.isEmpty && card.state != .unauthenticated {
@@ -138,9 +149,10 @@ struct ProviderCardView: View {
                 .progressViewStyle(.circular)
                 .controlSize(.mini)
         case .ready:
-            Text("Live")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Color(nsColor: card.id.accentColor))
+            Button("Sign Out") { signOutAction() }
+                .buttonStyle(.borderless)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
         default:
             EmptyView()
         }

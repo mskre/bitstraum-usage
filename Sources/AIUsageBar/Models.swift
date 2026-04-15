@@ -72,6 +72,7 @@ struct ProviderUsageCard: Codable, Identifiable {
     var state: ProviderState
     var lastUpdated: Date?
     var authenticated: Bool
+    var email: String?
 
     var bestFraction: Double? {
         limits.compactMap(\.fraction).min()
@@ -80,7 +81,8 @@ struct ProviderUsageCard: Codable, Identifiable {
     static func placeholder(for id: ProviderID) -> ProviderUsageCard {
         ProviderUsageCard(
             id: id, planName: "Not connected", statusMessage: "Sign in to start",
-            limits: [], state: .unauthenticated, lastUpdated: nil, authenticated: false
+            limits: [], state: .unauthenticated, lastUpdated: nil, authenticated: false,
+            email: nil
         )
     }
 }
@@ -99,6 +101,7 @@ struct ProviderScrapeResult: Decodable {
     var footer: String?
     var resetText: String?
     var remainingFraction: Double?
+    var email: String?
 }
 
 struct ScrapeLimit: Decodable {

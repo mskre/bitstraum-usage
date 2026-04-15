@@ -45,6 +45,7 @@ final class WebAutomationService: NSObject {
         )
         window.title = "Sign in to \(provider.title)"
         window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
         window.center()
 
         wv.frame = window.contentView!.bounds
@@ -84,6 +85,39 @@ final class WebAutomationService: NSObject {
                 try? await Task.sleep(for: .seconds(1))
                 onAuth()
             }
+        }
+    }
+
+    /// Signs out from a provider by clearing its cookies/data and destroying its webview.
+    func signOut(for provider: ProviderID) async {
+        // Close sign-in window if open
+        if let window = signInWindows[provider] {
+            window.close()
+            signInWindows.removeValue(forKey: provider)
+            signInDelegates.removeValue(forKey: provider)
+        }
+
+        // Remove cached webview
+        if let wv = webViews[provider] {
+            wv.removeFromSuperview()
+            wv.navigationDelegate = nil
+            webViews.removeValue(forKey: provider)
+        }
+
+        // Clear website data for this provider's domain
+        let allTypes = WKWebsiteDataStore.allWebsiteDataTypes()
+        let records = await dataStore.dataRecords(ofTypes: allTypes)
+        let domain = provider.loginURL.host ?? ""
+        let matching = records.filter { record in
+            record.displayName.contains(domain) ||
+            domain.contains(record.displayName)
+        }
+        if !matching.isEmpty {
+            await dataStore.removeData(ofTypes: allTypes, for: matching)
+        }
+
+        if signInWindows.isEmpty {
+            NSApp.setActivationPolicy(.accessory)
         }
     }
 

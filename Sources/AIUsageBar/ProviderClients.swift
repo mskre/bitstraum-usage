@@ -59,7 +59,8 @@ struct ScriptBackedProviderClient: ProviderClient {
             planName: r.planName?.trimmedNonEmpty ?? id.shortTitle,
             statusMessage: r.statusMessage?.trimmedNonEmpty ?? "OK",
             limits: limits, state: .ready,
-            lastUpdated: Date(), authenticated: true
+            lastUpdated: Date(), authenticated: true,
+            email: r.email?.trimmedNonEmpty
         )
     }
 }
@@ -90,7 +91,7 @@ enum ProviderScripts {
     /// `pctKeywords` is a regex fragment like "igjen|remaining|left" or "used".
     /// `fractionFromPct` is a JS expression: either `pct / 100` (for "remaining")
     /// or `(100 - pct) / 100` (for "used").
-    private static func domScraper(pctKeywords: String, fractionExpr: String, fallbackPlan: String) -> String {
+    private static func domScraper(pctKeywords: String, fractionExpr: String, fallbackPlan: String, emailFetchScript: String? = nil) -> String {
         // Double-escaped: Swift \\\\d → string value \\d → JS new RegExp("\\d") → regex \d
         let pctRegex = "(\\\\d{1,3})\\\\s*%\\\\s*(\(pctKeywords))"
         return """
@@ -130,6 +131,14 @@ enum ProviderScripts {
               planName = planMatches[pi];
               break;
             }
+          }
+
+          // Extract email: try API fetch if provided, fall back to regex
+          var email = null;
+          \(emailFetchScript ?? "")
+          if (!email) {
+            var emailMatch = text.match(/[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}/);
+            email = emailMatch ? emailMatch[0] : null;
           }
 
           var limits = [];
@@ -173,6 +182,53 @@ enum ProviderScripts {
             }
 
             if (!label) label = "Usage limit";
+
+            // Convert absolute reset times to relative
+            if (resetLabel) {
+              resetLabel = (function(raw) {
+                // Already relative like "Resets in 39 min" — keep as-is
+                if (/resets\\s+in\\s/i.test(raw)) return raw;
+
+                // Parse "Resets Sun 8:00 PM" or "Resets Tue 4:00 PM" etc.
+                var m = raw.match(/(?:resets?)\\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\\w*\\s+(\\d{1,2}):(\\d{2})\\s*(AM|PM)/i);
+                if (m) {
+                  var days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+                  var targetDay = -1;
+                  for (var di = 0; di < days.length; di++) {
+                    if (days[di].toLowerCase() === m[1].substring(0,3).toLowerCase()) { targetDay = di; break; }
+                  }
+                  if (targetDay >= 0) {
+                    var h = parseInt(m[2], 10);
+                    var min = parseInt(m[3], 10);
+                    if (m[4].toUpperCase() === "PM" && h < 12) h += 12;
+                    if (m[4].toUpperCase() === "AM" && h === 12) h = 0;
+
+                    var now = new Date();
+                    var target = new Date(now);
+                    var diff = targetDay - now.getDay();
+                    if (diff <= 0) diff += 7;
+                    target.setDate(target.getDate() + diff);
+                    target.setHours(h, min, 0, 0);
+
+                    // If target is in the past (edge case), add 7 days
+                    if (target <= now) target.setDate(target.getDate() + 7);
+
+                    var diffSec = Math.round((target - now) / 1000);
+                    if (diffSec > 0) {
+                      var dMin = Math.floor(diffSec / 60);
+                      if (dMin < 60) return "Resets in " + dMin + " min";
+                      var dH = Math.floor(dMin / 60);
+                      var rM = dMin % 60;
+                      if (dH < 24) return "Resets in " + dH + "h " + rM + "m";
+                      var dD = Math.floor(dH / 24);
+                      return "Resets in " + dD + "d " + (dH % 24) + "h";
+                    }
+                  }
+                }
+                return raw;
+              })(resetLabel);
+            }
+
             var id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 40);
 
             limits.push({
@@ -190,7 +246,8 @@ enum ProviderScripts {
               authenticated: true,
               planName: planName,
               statusMessage: "Page[" + text.length + "]: " + preview,
-              limits: []
+              limits: [],
+              email: email
             });
           }
 
@@ -198,7 +255,8 @@ enum ProviderScripts {
             authenticated: true,
             planName: planName,
             statusMessage: "Live",
-            limits: limits
+            limits: limits,
+            email: email
           });
         } catch(e) {
           return JSON.stringify({ authenticated: false, statusMessage: "Error: " + String(e) });
@@ -221,6 +279,7 @@ enum ProviderScripts {
       if (!accessToken) {
         return JSON.stringify({ authenticated: false, statusMessage: "ChatGPT sign-in required" });
       }
+      var email = (session.user && session.user.email) ? session.user.email : null;
 
       // Fetch usage data
       var resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
@@ -318,7 +377,8 @@ enum ProviderScripts {
         authenticated: true,
         planName: planName,
         statusMessage: limits.length > 0 ? "Live" : "No usage data",
-        limits: limits
+        limits: limits,
+        email: email
       });
     } catch(e) {
       return JSON.stringify({ authenticated: false, statusMessage: "Error: " + String(e) });
@@ -329,7 +389,16 @@ enum ProviderScripts {
     static let claude: String = domScraper(
         pctKeywords: "used",
         fractionExpr: "pct / 100",
-        fallbackPlan: "Claude"
+        fallbackPlan: "Claude",
+        emailFetchScript: """
+        try {
+          var acctResp = await fetch("https://claude.ai/api/account", { credentials: "include" });
+          if (acctResp.ok) {
+            var acct = await acctResp.json();
+            email = acct.email_address || null;
+          }
+        } catch(e) {}
+        """
     )
 
     // Gemini: no known usage counter, just detect sign-in state
