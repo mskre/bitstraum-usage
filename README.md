@@ -1,25 +1,31 @@
 # AI Usage Bar
 
-Native macOS menu bar app that polls account usage directly from authenticated web sessions.
+Native macOS menu bar app that shows your AI provider usage limits at a glance.
 
-## Current behavior
+Built with Swift, AppKit, SwiftUI, and WebKit. No Xcode project required — compiles with `swiftc` from Command Line Tools.
 
-- Native menu bar popover UI with horizontal graphs
-- Provider colors:
-  - ChatGPT: white
-  - Claude: orange
-  - Google Gemini: blue
-  - OpenRouter: purple
-- Per-provider sign-in windows using `WKWebView`
-- Persisted web sessions via `WKWebsiteDataStore.default()`
-- Direct authenticated polling for OpenRouter account credits
-- Heuristic web scraping hooks for ChatGPT, Claude, and Gemini
+## Features
 
-## Important limitation
+- Battery-style menu bar icon showing current session usage per provider
+- Liquid Glass dropdown panel (macOS 26) with per-provider usage breakdown
+- Authenticated polling via persistent `WKWebView` sessions
+- Auto-refresh every 5 minutes and on app launch
+- Live-updating "last updated X seconds ago" footer
 
-OpenRouter is wired against an authenticated account endpoint.
+## Providers
 
-ChatGPT, Claude, and Gemini consumer usage counters are not exposed as stable public OAuth APIs for the exact rolling `5h` and weekly counters you asked for, so the app uses authenticated web-session scraping. The provider hooks are in `Sources/AIUsageBar/ProviderClients.swift`.
+| Provider | Data source | What it shows |
+|---|---|---|
+| ChatGPT | `/backend-api/wham/usage` | 5h limit, weekly limit, per-model limits with reset times |
+| Claude | DOM scrape of `/settings/usage` | Current session, weekly all-models, weekly Sonnet with reset times |
+
+Gemini and OpenRouter are commented out in the source (no usage counters exposed by those providers).
+
+## Requirements
+
+- macOS 26 (Tahoe) or later
+- Xcode Command Line Tools (or full Xcode)
+- macOS 26 SDK for Liquid Glass support
 
 ## Build
 
@@ -27,18 +33,13 @@ ChatGPT, Claude, and Gemini consumer usage counters are not exposed as stable pu
 ./Scripts/build.sh
 ```
 
-This produces:
-
-- `./.build/AIUsageBar`
-- `./.build/AI Usage Bar.app`
-
-## Install Locally
+## Install
 
 ```bash
 ./Scripts/install.sh
 ```
 
-This installs the app to `~/Applications/AI Usage Bar.app`.
+Installs to `~/Applications/AI Usage Bar.app`.
 
 ## Run
 
@@ -48,16 +49,26 @@ This installs the app to `~/Applications/AI Usage Bar.app`.
 
 ## Usage
 
-1. Launch the app.
-2. Click `AI Usage` in the menu bar.
-3. Use `Sign In` on each provider card.
-4. Complete sign-in in the web window for that provider.
-5. Click `Refresh` in the dropdown.
+1. Launch the app — the battery-style icon appears in the menu bar.
+2. Click the icon to open the dropdown.
+3. Click **Sign In** on a provider card.
+4. Log in through the in-app browser window that opens.
+5. Usage data appears automatically after sign-in (or close the window to trigger a refresh).
+6. The app polls every 5 minutes in the background.
 
-## Tuning selectors
+## Architecture
 
-If ChatGPT, Claude, or Gemini shows `Needs tuning`, update the provider script for that service in:
+- **`AppMain.swift`** — status bar item, borderless `NSPanel` with `NSVisualEffectView`, Edit menu for clipboard support in sign-in windows
+- **`WebAutomationService.swift`** — one persistent `WKWebView` per provider for both sign-in and polling; `SignInNavigationDelegate` detects auth completion
+- **`ProviderClients.swift`** — per-provider JS scripts executed inside authenticated WKWebViews; ChatGPT uses `fetch()` against internal APIs, Claude scrapes the usage page DOM
+- **`UsageStore.swift`** — `ObservableObject` managing cards, refresh loop, and persistence
+- **`PopoverView.swift`** — SwiftUI dropdown with provider sections, usage bars, and percentages
+- **`StatusBarPreview.swift`** — template `NSImage` battery-style icon rendered into the status bar button
+- **`Models.swift`** — `ProviderID`, `ProviderUsageCard`, `UsageLimit`, and related types
 
-`Sources/AIUsageBar/ProviderClients.swift`
+## Adding a provider
 
-Those providers intentionally keep the extraction logic localized so you can adjust the page selectors or internal account fetches without touching the UI.
+1. Add a case to `ProviderID` in `Models.swift` with `loginURL` and `usageURL`.
+2. Write a JS script in `ProviderScripts` that returns a JSON string matching `ProviderScrapeResult`.
+3. Register it in `ProviderFactory.makeAll()`.
+4. The UI, menu bar icon, and refresh loop pick it up automatically.
