@@ -2,28 +2,45 @@ import SwiftUI
 
 struct PopoverView: View {
     @EnvironmentObject private var store: UsageStore
+    @State private var now = Date()
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 0) {
             header
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+            Divider().opacity(0.3)
 
             ForEach(store.cards) { card in
                 ProviderCardView(card: card) {
                     store.signIn(to: card.id)
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+
+                if card.id != store.cards.last?.id {
+                    Divider().opacity(0.2).padding(.horizontal, 14)
+                }
             }
 
+            Divider().opacity(0.3)
+
             footer
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
         }
-        .padding(10)
+        .padding(.vertical, 4)
         .frame(width: 310)
+        .onReceive(timer) { self.now = $0 }
     }
 
     private var header: some View {
         HStack {
-            Text("AI Usage")
+            Text("Bitstraum Vibbs")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
             Spacer()
             Button {
                 Task { await store.refreshAll() }
@@ -32,32 +49,37 @@ struct PopoverView: View {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .controlSize(.small)
-                        .tint(.white)
                 } else {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(.secondary)
                 }
             }
             .buttonStyle(.borderless)
         }
-        .padding(.bottom, 2)
     }
 
     private var footer: some View {
         HStack {
             Text(lastUpdatedText)
                 .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.40))
+                .foregroundStyle(.tertiary)
             Spacer()
         }
     }
 
     private var lastUpdatedText: String {
         guard let d = store.lastRefresh else { return "Not refreshed yet" }
-        return "Updated \(RelativeDateTimeFormatter().localizedString(for: d, relativeTo: Date()))"
+        let seconds = Int(now.timeIntervalSince(d))
+        if seconds < 5 { return "Last updated just now" }
+        if seconds < 60 { return "Last updated \(seconds) seconds ago" }
+        let minutes = seconds / 60
+        if minutes == 1 { return "Last updated 1 minute ago" }
+        return "Last updated \(minutes) minutes ago"
     }
 }
+
+// MARK: - Provider section
 
 struct ProviderCardView: View {
     let card: ProviderUsageCard
@@ -65,25 +87,24 @@ struct ProviderCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Circle()
                     .fill(Color(nsColor: card.id.accentColor))
                     .frame(width: 7, height: 7)
 
                 Text(card.id.shortTitle)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 13, weight: .semibold))
 
                 Text(card.planName)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.45))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
 
                 Spacer()
 
                 if card.state == .unauthenticated || card.state == .error {
                     Button("Sign In") { signInAction() }
                         .buttonStyle(.borderless)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color(nsColor: card.id.accentColor))
                 } else {
                     statusLabel
@@ -91,38 +112,42 @@ struct ProviderCardView: View {
             }
 
             if card.limits.isEmpty && card.state != .unauthenticated {
-                Text(card.statusMessage)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.45))
+                if card.state == .loading {
+                    Text("Fetching usage data...")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else if card.state == .ready {
+                    Text(card.statusMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
 
             ForEach(card.limits) { limit in
                 LimitRowView(limit: limit, color: Color(nsColor: card.id.accentColor))
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.white.opacity(0.06))
-        )
     }
 
+    @ViewBuilder
     private var statusLabel: some View {
-        let text: String
-        let color: Color
         switch card.state {
-        case .idle: text = "Idle"; color = .white.opacity(0.5)
-        case .loading: text = "..."; color = .white.opacity(0.5)
-        case .ready: text = "Live"; color = Color(nsColor: card.id.accentColor)
-        case .unauthenticated: text = ""; color = .clear
-        case .error: text = "!"; color = .orange
+        case .loading:
+            ProgressView()
+                .progressViewStyle(.circular)
+                .controlSize(.mini)
+        case .ready:
+            Text("Live")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color(nsColor: card.id.accentColor))
+        default:
+            EmptyView()
         }
-        return Text(text)
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(color)
     }
 }
+
+// MARK: - Limit row
 
 struct LimitRowView: View {
     let limit: UsageLimit
@@ -132,28 +157,24 @@ struct LimitRowView: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 0) {
                 Text(limit.label)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .font(.system(size: 11, weight: .medium))
+
                 Spacer()
-                if let r = limit.remaining, let t = limit.total, t > 0 {
-                    Text("\(Int(r))/\(Int(t))")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.55))
+
+                if let f = limit.fraction {
+                    Text("\(Int((f * 100).rounded()))%")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(color)
                 }
             }
 
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.10))
+                    Capsule().fill(.quaternary)
                     if let f = limit.fraction {
                         Capsule()
-                            .fill(LinearGradient(
-                                colors: [color.opacity(0.6), color],
-                                startPoint: .leading, endPoint: .trailing
-                            ))
+                            .fill(color)
                             .frame(width: max(geo.size.width * f.bounded(to: 0...1), 4))
-                    } else {
-                        Capsule().fill(color.opacity(0.20)).frame(width: geo.size.width)
                     }
                 }
             }
@@ -161,8 +182,8 @@ struct LimitRowView: View {
 
             if let reset = limit.resetLabel, !reset.isEmpty {
                 Text(reset)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
             }
         }
     }
