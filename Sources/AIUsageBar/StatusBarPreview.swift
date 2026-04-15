@@ -13,6 +13,12 @@ final class StatusBarPreviewView: NSView {
     var isRefreshing: Bool = false {
         didSet { updateIcon() }
     }
+    var providerColors: [ProviderID: NSColor] = [:] {
+        didSet { updateIcon() }
+    }
+    var colorizeIcon = false {
+        didSet { updateIcon() }
+    }
     private var lastKnownFractions: [ProviderID: CGFloat] = [:]
 
     private weak var button: NSStatusBarButton?
@@ -55,7 +61,9 @@ final class StatusBarPreviewView: NSView {
                 // Outline
                 let outline = NSBezierPath(roundedRect: outerRect.insetBy(dx: lineW / 2, dy: lineW / 2),
                                            xRadius: radius, yRadius: radius)
-                NSColor.black.withAlphaComponent(isAuthed ? 0.9 : 0.35).setStroke()
+                let providerColor = self.providerColors[provider] ?? provider.defaultAccentColor
+                let strokeColor = self.colorizeIcon ? NSColor.white.withAlphaComponent(isAuthed ? 0.95 : 0.35) : NSColor.black.withAlphaComponent(isAuthed ? 0.9 : 0.35)
+                strokeColor.setStroke()
                 outline.lineWidth = lineW
                 outline.stroke()
 
@@ -69,7 +77,8 @@ final class StatusBarPreviewView: NSView {
                     clipPath.addClip()
 
                     let fillRect = NSRect(x: inset.minX, y: inset.minY, width: min(fillW, inset.width), height: inset.height)
-                    NSColor.black.setFill()
+                    let fillColor = self.colorizeIcon ? providerColor : NSColor.black
+                    fillColor.setFill()
                     NSBezierPath(rect: fillRect).fill()
 
                     NSGraphicsContext.restoreGraphicsState()
@@ -79,7 +88,7 @@ final class StatusBarPreviewView: NSView {
             return true
         }
 
-        image.isTemplate = true
+        image.isTemplate = !colorizeIcon
         button.image = image
         button.imagePosition = .imageOnly
     }

@@ -4,7 +4,7 @@ import SwiftUI
 
 @MainActor
 @main
-final class AIUsageBarMain: NSObject, NSApplicationDelegate {
+final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let store = UsageStore()
     private let colorSettings = ColorSettings.shared
     private let popoverController = PopoverController()
@@ -128,6 +128,8 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         let preview = StatusBarPreviewView()
         preview.cards = store.cards
         preview.isRefreshing = store.isRefreshing
+        preview.providerColors = colorSettings.providerColors
+        preview.colorizeIcon = colorSettings.colorizeStatusIcon
         preview.attach(to: button)
 
         button.target = self
@@ -142,6 +144,12 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
         store.$isRefreshing
             .sink { [weak self] refreshing in self?.previewView?.isRefreshing = refreshing }
+            .store(in: &cancellables)
+        colorSettings.$providerColors
+            .sink { [weak self] colors in self?.previewView?.providerColors = colors }
+            .store(in: &cancellables)
+        colorSettings.$colorizeStatusIcon
+            .sink { [weak self] enabled in self?.previewView?.colorizeIcon = enabled }
             .store(in: &cancellables)
 
         NotificationCenter.default.addObserver(
@@ -171,9 +179,14 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         popover.contentViewController = controller
         popover.behavior = .transient
         popover.animates = true
+        popover.delegate = self
         popoverController.close = { [weak self] in
             self?.popover.performClose(nil)
         }
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        popoverController.didClose()
     }
 
     @objc
