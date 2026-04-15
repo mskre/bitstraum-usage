@@ -2,7 +2,6 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// NSPanel subclass that can become key so SwiftUI buttons inside it actually work.
 final class KeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
@@ -26,6 +25,7 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        configureMainMenu()
         configureStatusItem()
         configurePanel()
         bindStore()
@@ -33,11 +33,33 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         store.start()
     }
 
+    private func configureMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(title: "Quit AI Usage Bar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        NSApplication.shared.mainMenu = mainMenu
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         store.stop()
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-        }
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
     }
 
     // MARK: - Status item
@@ -48,38 +70,23 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         let preview = StatusBarPreviewView()
         preview.cards = store.cards
         preview.isRefreshing = store.isRefreshing
-        preview.translatesAutoresizingMaskIntoConstraints = false
+        preview.attach(to: button)
 
-        button.addSubview(preview)
-        NSLayoutConstraint.activate([
-            preview.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 2),
-            preview.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -2),
-            preview.topAnchor.constraint(equalTo: button.topAnchor),
-            preview.bottomAnchor.constraint(equalTo: button.bottomAnchor),
-        ])
-
-        button.frame = NSRect(x: 0, y: 0, width: preview.intrinsicContentSize.width + 4, height: 22)
         button.target = self
         button.action = #selector(togglePanel(_:))
-
         self.previewView = preview
     }
 
     private func bindStore() {
         store.$cards
-            .sink { [weak self] cards in
-                self?.previewView?.cards = cards
-            }
+            .sink { [weak self] cards in self?.previewView?.cards = cards }
             .store(in: &cancellables)
-
         store.$isRefreshing
-            .sink { [weak self] refreshing in
-                self?.previewView?.isRefreshing = refreshing
-            }
+            .sink { [weak self] refreshing in self?.previewView?.isRefreshing = refreshing }
             .store(in: &cancellables)
     }
 
-    // MARK: - Panel
+    // MARK: - Liquid Glass Panel
 
     private func configurePanel() {
         let hostingView = NSHostingView(rootView: PopoverView().environmentObject(store))
@@ -98,21 +105,24 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
         p.isOpaque = false
         p.isMovableByWindowBackground = false
 
-        let wrapper = NSView()
-        wrapper.wantsLayer = true
-        wrapper.layer?.cornerRadius = 12
-        wrapper.layer?.masksToBounds = true
-        wrapper.layer?.backgroundColor = NSColor(red: 0.08, green: 0.09, blue: 0.11, alpha: 1).cgColor
+        // Use NSVisualEffectView for native translucent menu-like background
+        let visualEffect = NSVisualEffectView()
+        visualEffect.material = .menu
+        visualEffect.state = .active
+        visualEffect.blendingMode = .behindWindow
+        visualEffect.wantsLayer = true
+        visualEffect.layer?.cornerRadius = 12
+        visualEffect.layer?.masksToBounds = true
 
-        p.contentView = wrapper
-        wrapper.addSubview(hostingView)
-
+        visualEffect.addSubview(hostingView)
         NSLayoutConstraint.activate([
-            hostingView.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
-            hostingView.topAnchor.constraint(equalTo: wrapper.topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: visualEffect.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: visualEffect.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: visualEffect.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: visualEffect.bottomAnchor),
         ])
+
+        p.contentView = visualEffect
 
         self.panel = p
     }
@@ -143,9 +153,7 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate {
 
     private func startEventMonitor() {
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor in
-                self?.panel?.orderOut(nil)
-            }
+            Task { @MainActor in self?.panel?.orderOut(nil) }
         }
     }
 }
