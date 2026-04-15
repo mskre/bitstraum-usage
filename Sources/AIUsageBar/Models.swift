@@ -4,8 +4,10 @@ import Foundation
 enum ProviderID: String, CaseIterable, Codable, Identifiable {
     case chatgpt
     case claude
-    case gemini
-    case openrouter
+    // case gemini      // no usage counter exposed
+    // case openrouter  // no usage counter exposed
+
+    static var allCases: [ProviderID] { [.chatgpt, .claude] }
 
     var id: String { rawValue }
 
@@ -13,8 +15,6 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .chatgpt: return "ChatGPT"
         case .claude: return "Claude"
-        case .gemini: return "Google Gemini"
-        case .openrouter: return "OpenRouter"
         }
     }
 
@@ -22,8 +22,6 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .chatgpt: return "GPT"
         case .claude: return "Claude"
-        case .gemini: return "Gemini"
-        case .openrouter: return "OR"
         }
     }
 
@@ -31,28 +29,20 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .chatgpt: return NSColor(white: 0.95, alpha: 1.0)
         case .claude: return NSColor(calibratedRed: 0.95, green: 0.50, blue: 0.19, alpha: 1.0)
-        case .gemini: return NSColor(calibratedRed: 0.30, green: 0.58, blue: 0.98, alpha: 1.0)
-        case .openrouter: return NSColor(calibratedRed: 0.54, green: 0.42, blue: 0.96, alpha: 1.0)
         }
     }
 
-    /// URL opened in the system browser for initial sign-in
     var loginURL: URL {
         switch self {
         case .chatgpt: return URL(string: "https://chatgpt.com/")!
         case .claude: return URL(string: "https://claude.ai/")!
-        case .gemini: return URL(string: "https://gemini.google.com/app")!
-        case .openrouter: return URL(string: "https://openrouter.ai/credits")!
         }
     }
 
-    /// URL opened in the in-app verify window and used for scraping
     var usageURL: URL {
         switch self {
-        case .chatgpt: return URL(string: "https://chatgpt.com/codex/cloud/settings/usage")!
+        case .chatgpt: return URL(string: "https://chatgpt.com/codex/cloud/settings/analytics")!
         case .claude: return URL(string: "https://claude.ai/settings/usage")!
-        case .gemini: return URL(string: "https://gemini.google.com/app")!
-        case .openrouter: return URL(string: "https://openrouter.ai/")!
         }
     }
 }
