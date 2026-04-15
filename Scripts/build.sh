@@ -26,3 +26,7 @@ cp "$OUTPUT_BIN" "$APP_MACOS/AIUsageBar"
 chmod +x "$APP_MACOS/AIUsageBar"
 
 printf "Bundled %s\n" "$APP_DIR"
+
+# Ad-hoc code sign
+codesign --force --deep --sign - "$APP_DIR"
+printf "Signed %s\n" "$APP_DIR"
