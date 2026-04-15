@@ -29,8 +29,8 @@ final class WebAutomationService: NSObject {
     }
 
     /// Opens the persistent WKWebView in a visible window for sign-in.
-    /// `onAuth` is called after the sign-in window closes.
-    /// Also called when the window is closed.
+    /// `onAuth` is called whenever the sign-in window closes, regardless of whether authentication succeeds.
+    /// Successful authentication automatically closes the window, which then triggers `onAuth`.
     func signIn(for provider: ProviderID, onAuth: @escaping () -> Void) {
         if let existing = signInWindows[provider] {
             NSApp.setActivationPolicy(.regular)
@@ -104,12 +104,10 @@ final class WebAutomationService: NSObject {
 
     /// Signs out from a provider by clearing its cookies/data and destroying its webview.
     func signOut(for provider: ProviderID) async {
-        // Mark this close as intentional so the close observer does not
-        // trigger a refresh callback while signing out.
-        suppressedCloseCallbacks.insert(provider)
-
-        // Close sign-in window if open
+        // Close sign-in window if open; suppress the close observer's
+        // onAuth callback so sign-out doesn't trigger a refresh.
         if let window = signInWindows[provider] {
+            suppressedCloseCallbacks.insert(provider)
             window.close()
         } else {
             cleanupSignInSession(for: provider)
@@ -242,7 +240,7 @@ final class SignInNavigationDelegate: NSObject, WKNavigationDelegate {
                     return
                 }
 
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .seconds(3))
             }
         }
     }
