@@ -162,11 +162,8 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         store.$downdetectorData
             .sink { [weak self] data in self?.previewView?.downdetectorData = data }
             .store(in: &cancellables)
-        colorSettings.$ddRecencyByProvider
-            .sink { [weak self] val in self?.previewView?.ddRecencyByProvider = val }
-            .store(in: &cancellables)
-        colorSettings.$ddBaselineByProvider
-            .sink { [weak self] val in self?.previewView?.ddBaselineByProvider = val }
+        colorSettings.$ddBaselinePercent
+            .sink { [weak self] val in self?.previewView?.ddBaselinePercent = val }
             .store(in: &cancellables)
         colorSettings.$showDowndetector
             .sink { [weak self] val in self?.previewView?.showDowndetector = val }
@@ -350,8 +347,7 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 let key = "dd-\(provider.rawValue)"
                 if let report = downdetector[provider] {
                     let status = report.effectiveStatus(
-                        recencyMinutes: colorSettings.recencyMinutes(for: provider),
-                        baselinePercent: colorSettings.baselinePercent(for: provider)
+                        baselinePercent: colorSettings.ddBaselinePercent
                     )
                     if status.hasProblems {
                         if !activeAlerts.contains(key) {
