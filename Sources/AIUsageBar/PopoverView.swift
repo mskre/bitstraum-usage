@@ -259,6 +259,9 @@ struct PopoverView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
             Spacer()
+            Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -595,7 +598,7 @@ struct ColorSettingsView: View {
                             .foregroundStyle(.secondary)
                             .frame(width: 46, alignment: .trailing)
                     }
-                    Slider(value: $colorSettings.ddBaselinePercent, in: 100...2000, step: 100)
+                    Slider(value: $colorSettings.ddBaselinePercent, in: 1000...3000, step: 100)
                         .controlSize(.mini)
                     if !globalThresholdReports.isEmpty {
                         Text(globalThresholdReports)
@@ -623,6 +626,7 @@ struct ColorSettingsView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
             }
+
         }
     }
 }

@@ -153,7 +153,7 @@ final class ColorSettings: ObservableObject {
         self.maskDomainOnly = defaults.object(forKey: maskDomainOnlyKey) as? Bool ?? false
         self.showDowndetector = defaults.object(forKey: showDowndetectorKey) as? Bool ?? true
         self.pinDowndetector = defaults.object(forKey: pinDowndetectorKey) as? Bool ?? false
-        self.ddBaselinePercent = defaults.object(forKey: ddBaselinePercentKey) as? Double ?? 500
+        self.ddBaselinePercent = defaults.object(forKey: ddBaselinePercentKey) as? Double ?? 2000
         self.ddChartHours = defaults.object(forKey: ddChartHoursKey) as? Double ?? 6
         self.showResetLabels = defaults.object(forKey: showResetLabelsKey) as? Bool ?? true
         self.use24HourTime = defaults.object(forKey: use24HourTimeKey) as? Bool ?? true
@@ -206,7 +206,7 @@ final class ColorSettings: ObservableObject {
         showSensitiveInfo = true
         showDowndetector = true
         pinDowndetector = false
-        ddBaselinePercent = 500
+        ddBaselinePercent = 2000
         ddChartHours = 6
         showAlertDot = true
         sendNotifications = true
