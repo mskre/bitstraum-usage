@@ -340,7 +340,7 @@ struct ProviderCardView: View {
             // Downdetector status: show when pinned, or auto-show on recent problems
             if colorSettings.showDowndetector, let report = store.downdetectorData[card.id],
                colorSettings.pinDowndetector || report.effectiveStatus(recencyMinutes: colorSettings.recencyMinutes(for: card.id), baselinePercent: colorSettings.baselinePercent(for: card.id)).hasProblems {
-                DowndetectorStatusView(report: report, providerSlug: card.id.downdetectorSlug ?? "", recencyMinutes: colorSettings.recencyMinutes(for: card.id), baselinePercent: colorSettings.baselinePercent(for: card.id), chartHours: colorSettings.chartHours(for: card.id))
+                DowndetectorStatusView(report: report, providerSlug: card.id.downdetectorSlug ?? "", recencyMinutes: colorSettings.recencyMinutes(for: card.id), baselinePercent: colorSettings.baselinePercent(for: card.id), chartHours: colorSettings.chartHours(for: card.id), use24HourTime: colorSettings.use24HourTime)
             }
         }
     }
@@ -491,6 +491,7 @@ struct ColorSettingsView: View {
                 settingsToggle("Remember last open view", isOn: $colorSettings.rememberLastView)
                 settingsToggle("Show reset labels", isOn: $colorSettings.showResetLabels)
                 settingsToggle("Provider labels in menu bar", isOn: $colorSettings.showProviderLabels)
+                settingsToggle("24-hour time format", isOn: $colorSettings.use24HourTime)
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
@@ -564,7 +565,15 @@ struct ColorSettingsView: View {
             }
 
             HStack {
+                Button("Quit Bitstraum Usage") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 10))
+                .foregroundStyle(.red.opacity(0.7))
+
                 Spacer()
+
                 Button("Reset to Defaults") {
                     colorSettings.resetToDefaults()
                 }
@@ -1223,7 +1232,8 @@ struct DowndetectorTabView: View {
                             color: colorSettings.swiftUIColor(for: provider),
                             recencyMinutes: colorSettings.recencyMinutes(for: provider),
                             baselinePercent: colorSettings.baselinePercent(for: provider),
-                            chartHours: colorSettings.chartHours(for: provider)
+                            chartHours: colorSettings.chartHours(for: provider),
+                            use24HourTime: colorSettings.use24HourTime
                         )
                         .padding(.vertical, 8)
 
@@ -1262,14 +1272,15 @@ struct DowndetectorProviderSection: View {
     let recencyMinutes: Double
     var baselinePercent: Double = 200
     var chartHours: Double = 24
+    var use24HourTime: Bool = true
 
     @State private var hoveredIndex: Int? = nil
 
-    private static let timeFormatter: DateFormatter = {
+    private func formatTime(_ date: Date) -> String {
         let f = DateFormatter()
-        f.dateFormat = "MMM d, h:mm a"
-        return f
-    }()
+        f.dateFormat = use24HourTime ? "MMM d, HH:mm" : "MMM d, h:mm a"
+        return f.string(from: date)
+    }
 
     private var filteredDataPoints: [DowndetectorDataPoint] {
         guard chartHours < 24 else { return report.dataPoints }
@@ -1344,7 +1355,7 @@ struct DowndetectorProviderSection: View {
                 HStack {
                     if let idx = hoveredIndex, idx < filteredDataPoints.count {
                         let point = filteredDataPoints[idx]
-                        Text(Self.timeFormatter.string(from: point.timestamp))
+                        Text(formatTime(point.timestamp))
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -1444,14 +1455,15 @@ struct DowndetectorStatusView: View {
     let recencyMinutes: Double
     var baselinePercent: Double = 200
     var chartHours: Double = 24
+    var use24HourTime: Bool = true
 
     @State private var hoveredIndex: Int? = nil
 
-    private static let timeFormatter: DateFormatter = {
+    private func formatTime(_ date: Date) -> String {
         let f = DateFormatter()
-        f.dateFormat = "MMM d, h:mm a"
-        return f
-    }()
+        f.dateFormat = use24HourTime ? "MMM d, HH:mm" : "MMM d, h:mm a"
+        return f.string(from: date)
+    }
 
     private var filteredDataPoints: [DowndetectorDataPoint] {
         guard chartHours < 24 else { return report.dataPoints }
@@ -1514,7 +1526,7 @@ struct DowndetectorStatusView: View {
             HStack {
                 if let idx = hoveredIndex, idx < filteredDataPoints.count {
                     let point = filteredDataPoints[idx]
-                    Text(Self.timeFormatter.string(from: point.timestamp))
+                    Text(formatTime(point.timestamp))
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                     Spacer()
