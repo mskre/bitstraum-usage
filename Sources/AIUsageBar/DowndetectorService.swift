@@ -35,17 +35,10 @@ struct DowndetectorReport {
     var indicators: [DowndetectorIndicator]
     var fetchedAt: Date
 
-    /// Adjusts status based on recency and baseline threshold.
-    func effectiveStatus(recencyMinutes: Double, baselinePercent: Double = 200) -> DowndetectorStatusLevel {
+    /// Adjusts status based on whether the latest data point exceeds the baseline multiplier.
+    func effectiveStatus(baselinePercent: Double = 400) -> DowndetectorStatusLevel {
         guard status.hasProblems else { return status }
-
-        let cutoff = Date().addingTimeInterval(-recencyMinutes * 60)
-        let recentPoints = dataPoints.filter { $0.timestamp >= cutoff }
-
-        guard let latest = (recentPoints.max(by: { $0.timestamp < $1.timestamp })
-            ?? dataPoints.max(by: { $0.timestamp < $1.timestamp })) else {
-            return .success
-        }
+        guard let latest = dataPoints.last else { return .success }
 
         let multiplier = baselinePercent / 100.0
         let hasCurrentProblems = latest.baseline > 0

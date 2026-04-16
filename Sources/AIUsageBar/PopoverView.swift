@@ -339,8 +339,8 @@ struct ProviderCardView: View {
 
             // Downdetector status: show when pinned, or auto-show on recent problems
             if colorSettings.showDowndetector, let report = store.downdetectorData[card.id],
-               colorSettings.pinDowndetector || report.effectiveStatus(recencyMinutes: colorSettings.recencyMinutes(for: card.id), baselinePercent: colorSettings.baselinePercent(for: card.id)).hasProblems {
-                DowndetectorStatusView(report: report, providerSlug: card.id.downdetectorSlug ?? "", recencyMinutes: colorSettings.recencyMinutes(for: card.id), baselinePercent: colorSettings.baselinePercent(for: card.id), chartHours: colorSettings.chartHours(for: card.id), use24HourTime: colorSettings.use24HourTime)
+               colorSettings.pinDowndetector || report.effectiveStatus(baselinePercent: colorSettings.ddBaselinePercent).hasProblems {
+                DowndetectorStatusView(report: report, providerSlug: card.id.downdetectorSlug ?? "", baselinePercent: colorSettings.ddBaselinePercent, chartHours: colorSettings.ddChartHours, use24HourTime: colorSettings.use24HourTime)
             }
         }
     }
@@ -451,6 +451,24 @@ struct ColorSettingsView: View {
         .padding(.vertical, 1)
     }
 
+    private var globalBaselineLabel: String {
+        let mult = colorSettings.ddBaselinePercent / 100.0
+        if mult == mult.rounded() { return "\(Int(mult))x" }
+        return String(format: "%.1fx", mult)
+    }
+
+    private var globalThresholdReports: String {
+        let mult = colorSettings.ddBaselinePercent / 100.0
+        var parts: [String] = []
+        for provider in ProviderID.allCases {
+            if let b = store.downdetectorData[provider]?.dataPoints.last?.baseline, b > 0 {
+                let reports = Int((Double(b) * mult).rounded())
+                parts.append("\(provider.title): ≈ \(reports) reports")
+            }
+        }
+        return parts.joined(separator: ", ")
+    }
+
     private var previewEmailText: String {
         guard colorSettings.showSensitiveInfo else { return "Hidden" }
         return colorSettings.maskSensitiveData ? maskEmail(sampleEmail, percentage: colorSettings.maskPercentage, domainOnly: colorSettings.maskDomainOnly) : sampleEmail
@@ -516,33 +534,34 @@ struct ColorSettingsView: View {
             // MARK: Privacy
             settingsSection("Privacy") {
                 settingsToggle("Show emails / sensitive info", isOn: $colorSettings.showSensitiveInfo)
-                settingsToggle("Mask emails", isOn: $colorSettings.maskSensitiveData)
 
-                if colorSettings.maskSensitiveData {
-                    settingsToggle("Only mask domain after @", isOn: $colorSettings.maskDomainOnly)
-                        .disabled(!colorSettings.showSensitiveInfo)
+                if colorSettings.showSensitiveInfo {
+                    settingsToggle("Mask emails", isOn: $colorSettings.maskSensitiveData)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Mask amount")
-                                .font(.system(size: 12))
-                            Spacer()
-                            Text("\(Int((colorSettings.maskPercentage * 100).rounded()))%")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: $colorSettings.maskPercentage, in: 0...1, step: 0.05)
-                            .controlSize(.mini)
-                            .disabled(!colorSettings.showSensitiveInfo)
-                        HStack(spacing: 6) {
-                            Text("Preview")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                            Text(previewEmailText)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                    if colorSettings.maskSensitiveData {
+                        settingsToggle("Only mask domain after @", isOn: $colorSettings.maskDomainOnly)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Mask amount")
+                                    .font(.system(size: 12))
+                                Spacer()
+                                Text("\(Int((colorSettings.maskPercentage * 100).rounded()))%")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(value: $colorSettings.maskPercentage, in: 0...1, step: 0.05)
+                                .controlSize(.mini)
+                            HStack(spacing: 6) {
+                                Text("Preview")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                Text(previewEmailText)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
                         }
                     }
                 }
@@ -554,12 +573,35 @@ struct ColorSettingsView: View {
                 settingsToggle("Always show on main view", isOn: $colorSettings.pinDowndetector)
                     .disabled(!colorSettings.showDowndetector)
 
-                ForEach(ProviderID.allCases) { provider in
-                    DowndetectorProviderSettings(
-                        provider: provider,
-                        colorSettings: colorSettings,
-                        baseline: store.downdetectorData[provider]?.dataPoints.last?.baseline
-                    )
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Chart range")
+                            .font(.system(size: 11))
+                        Spacer()
+                        Text(colorSettings.ddChartHours == 24 ? "24h" : "\(Int(colorSettings.ddChartHours))h")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 36, alignment: .trailing)
+                    }
+                    Slider(value: $colorSettings.ddChartHours, in: 1...24, step: 1)
+                        .controlSize(.mini)
+
+                    HStack {
+                        Text("Baseline")
+                            .font(.system(size: 11))
+                        Spacer()
+                        Text(globalBaselineLabel)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 46, alignment: .trailing)
+                    }
+                    Slider(value: $colorSettings.ddBaselinePercent, in: 100...2000, step: 100)
+                        .controlSize(.mini)
+                    if !globalThresholdReports.isEmpty {
+                        Text(globalThresholdReports)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
                 }
                 .disabled(!colorSettings.showDowndetector)
             }
@@ -1109,112 +1151,6 @@ struct HexTextField: NSViewRepresentable {
     }
 }
 
-// MARK: - Downdetector per-provider settings
-
-struct DowndetectorProviderSettings: View {
-    let provider: ProviderID
-    @ObservedObject var colorSettings: ColorSettings
-    let baseline: Int?
-
-    @State private var isExpanded = false
-
-    private var recencyBinding: Binding<Double> {
-        Binding(
-            get: { colorSettings.recencyMinutes(for: provider) },
-            set: { colorSettings.setRecencyMinutes($0, for: provider) }
-        )
-    }
-
-    private var baselineBinding: Binding<Double> {
-        Binding(
-            get: { colorSettings.baselinePercent(for: provider) },
-            set: { colorSettings.setBaselinePercent($0, for: provider) }
-        )
-    }
-
-    private var chartHoursBinding: Binding<Double> {
-        Binding(
-            get: { colorSettings.chartHours(for: provider) },
-            set: { colorSettings.setChartHours($0, for: provider) }
-        )
-    }
-
-    private var thresholdReports: String {
-        guard let b = baseline, b > 0 else { return "" }
-        let pct = colorSettings.baselinePercent(for: provider)
-        let reports = Int((Double(b) * pct / 100).rounded())
-        return "≈ \(reports) reports"
-    }
-
-    private var chartHoursLabel: String {
-        let h = Int(colorSettings.chartHours(for: provider))
-        return h == 24 ? "24h" : "\(h)h"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Tappable header
-            HStack {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 10)
-                Text(provider.title)
-                    .font(.system(size: 12, weight: .semibold))
-                Spacer()
-            }
-            .contentShape(Rectangle())
-            .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() } }
-
-            if isExpanded {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Chart range")
-                            .font(.system(size: 11))
-                        Spacer()
-                        Text(chartHoursLabel)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 36, alignment: .trailing)
-                    }
-                    Slider(value: chartHoursBinding, in: 1...24, step: 1)
-                        .controlSize(.mini)
-
-                    HStack {
-                        Text("Recency")
-                            .font(.system(size: 11))
-                        Spacer()
-                        Text("\(Int(colorSettings.recencyMinutes(for: provider))) min")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 52, alignment: .trailing)
-                    }
-                    Slider(value: recencyBinding, in: 15...240, step: 15)
-                        .controlSize(.mini)
-
-                    HStack {
-                        Text("Baseline")
-                            .font(.system(size: 11))
-                        Spacer()
-                        Text(thresholdReports)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 80, alignment: .trailing)
-                        Text("\(Int(colorSettings.baselinePercent(for: provider)))%")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 46, alignment: .trailing)
-                    }
-                    Slider(value: baselineBinding, in: 50...2000, step: 50)
-                        .controlSize(.mini)
-                }
-                .padding(.top, 4)
-                .padding(.leading, 14)
-            }
-        }
-    }
-}
-
 // MARK: - Downdetector tab
 
 struct DowndetectorTabView: View {
@@ -1230,9 +1166,8 @@ struct DowndetectorTabView: View {
                             provider: provider,
                             report: report,
                             color: colorSettings.swiftUIColor(for: provider),
-                            recencyMinutes: colorSettings.recencyMinutes(for: provider),
-                            baselinePercent: colorSettings.baselinePercent(for: provider),
-                            chartHours: colorSettings.chartHours(for: provider),
+                            baselinePercent: colorSettings.ddBaselinePercent,
+                            chartHours: colorSettings.ddChartHours,
                             use24HourTime: colorSettings.use24HourTime
                         )
                         .padding(.vertical, 8)
@@ -1269,8 +1204,7 @@ struct DowndetectorProviderSection: View {
     let provider: ProviderID
     let report: DowndetectorReport
     let color: Color
-    let recencyMinutes: Double
-    var baselinePercent: Double = 200
+    var baselinePercent: Double = 400
     var chartHours: Double = 24
     var use24HourTime: Bool = true
 
@@ -1295,7 +1229,7 @@ struct DowndetectorProviderSection: View {
     }
 
     private var effectiveStatus: DowndetectorStatusLevel {
-        report.effectiveStatus(recencyMinutes: recencyMinutes, baselinePercent: baselinePercent)
+        report.effectiveStatus(baselinePercent: baselinePercent)
     }
 
     private var statusColor: Color {
@@ -1452,8 +1386,7 @@ struct IndicatorRingView: View {
 struct DowndetectorStatusView: View {
     let report: DowndetectorReport
     let providerSlug: String
-    let recencyMinutes: Double
-    var baselinePercent: Double = 200
+    var baselinePercent: Double = 400
     var chartHours: Double = 24
     var use24HourTime: Bool = true
 
@@ -1478,7 +1411,7 @@ struct DowndetectorStatusView: View {
     }
 
     private var effectiveStatus: DowndetectorStatusLevel {
-        report.effectiveStatus(recencyMinutes: recencyMinutes, baselinePercent: baselinePercent)
+        report.effectiveStatus(baselinePercent: baselinePercent)
     }
 
     private var statusColor: Color {

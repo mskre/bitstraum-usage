@@ -22,10 +22,7 @@ final class StatusBarPreviewView: NSView {
     var downdetectorData: [ProviderID: DowndetectorReport] = [:] {
         didSet { updateIcon() }
     }
-    var ddRecencyByProvider: [ProviderID: Double] = [:] {
-        didSet { updateIcon() }
-    }
-    var ddBaselineByProvider: [ProviderID: Double] = [:] {
+    var ddBaselinePercent: Double = 400 {
         didSet { updateIcon() }
     }
     var showDowndetector: Bool = true {
@@ -61,8 +58,7 @@ final class StatusBarPreviewView: NSView {
         // Check Downdetector
         if showDowndetector, let report = downdetectorData[provider] {
             let status = report.effectiveStatus(
-                recencyMinutes: ddRecencyByProvider[provider] ?? 30,
-                baselinePercent: ddBaselineByProvider[provider] ?? 200
+                baselinePercent: ddBaselinePercent
             )
             switch status {
             case .danger: return .red

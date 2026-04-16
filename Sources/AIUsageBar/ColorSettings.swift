@@ -56,45 +56,12 @@ final class ColorSettings: ObservableObject {
         didSet { defaults.set(pinDowndetector, forKey: pinDowndetectorKey) }
     }
 
-    /// Per-provider recency minutes. Only treat Downdetector as "problems"
-    /// if elevated reports occurred within the last N minutes for that provider.
-    @Published var ddRecencyByProvider: [ProviderID: Double] {
-        didSet { saveProviderDoubles(ddRecencyByProvider, key: ddRecencyByProviderKey) }
+    @Published var ddBaselinePercent: Double {
+        didSet { defaults.set(ddBaselinePercent, forKey: ddBaselinePercentKey) }
     }
 
-    /// Per-provider baseline percentage. Minimum percentage of baseline that
-    /// reports must reach to count as a problem for that provider.
-    @Published var ddBaselineByProvider: [ProviderID: Double] {
-        didSet { saveProviderDoubles(ddBaselineByProvider, key: ddBaselineByProviderKey) }
-    }
-
-    /// Per-provider chart time range in hours (how far back to show).
-    @Published var ddChartHoursByProvider: [ProviderID: Double] {
-        didSet { saveProviderDoubles(ddChartHoursByProvider, key: ddChartHoursKey) }
-    }
-
-    func recencyMinutes(for provider: ProviderID) -> Double {
-        ddRecencyByProvider[provider] ?? 30
-    }
-
-    func baselinePercent(for provider: ProviderID) -> Double {
-        ddBaselineByProvider[provider] ?? 200
-    }
-
-    func setRecencyMinutes(_ value: Double, for provider: ProviderID) {
-        ddRecencyByProvider[provider] = value
-    }
-
-    func setBaselinePercent(_ value: Double, for provider: ProviderID) {
-        ddBaselineByProvider[provider] = value
-    }
-
-    func chartHours(for provider: ProviderID) -> Double {
-        ddChartHoursByProvider[provider] ?? 24
-    }
-
-    func setChartHours(_ value: Double, for provider: ProviderID) {
-        ddChartHoursByProvider[provider] = value
+    @Published var ddChartHours: Double {
+        didSet { defaults.set(ddChartHours, forKey: ddChartHoursKey) }
     }
 
     @Published var showResetLabels: Bool {
@@ -149,11 +116,8 @@ final class ColorSettings: ObservableObject {
     private let maskDomainOnlyKey = "maskDomainOnly"
     private let showDowndetectorKey = "showDowndetector"
     private let pinDowndetectorKey = "pinDowndetector"
-    private let ddRecencyKey = "downdetectorRecencyMinutes" // legacy
-    private let ddBaselinePercentKey = "downdetectorBaselinePercent" // legacy
-    private let ddRecencyByProviderKey = "ddRecencyByProvider"
-    private let ddBaselineByProviderKey = "ddBaselineByProvider"
-    private let ddChartHoursKey = "ddChartHoursByProvider"
+    private let ddBaselinePercentKey = "downdetectorBaselinePercent"
+    private let ddChartHoursKey = "ddChartHours"
     private let showResetLabelsKey = "showResetLabels"
     private let use24HourTimeKey = "use24HourTime"
     private let showProviderLabelsKey = "showProviderLabels"
@@ -189,12 +153,8 @@ final class ColorSettings: ObservableObject {
         self.maskDomainOnly = defaults.object(forKey: maskDomainOnlyKey) as? Bool ?? false
         self.showDowndetector = defaults.object(forKey: showDowndetectorKey) as? Bool ?? true
         self.pinDowndetector = defaults.object(forKey: pinDowndetectorKey) as? Bool ?? false
-        // Per-provider Downdetector settings (migrate from legacy globals)
-        let legacyRecency = defaults.object(forKey: ddRecencyKey) as? Double ?? 30
-        let legacyBaseline = defaults.object(forKey: ddBaselinePercentKey) as? Double ?? 200
-        self.ddRecencyByProvider = Self.loadProviderDoubles(from: defaults, key: ddRecencyByProviderKey, fallback: legacyRecency)
-        self.ddBaselineByProvider = Self.loadProviderDoubles(from: defaults, key: ddBaselineByProviderKey, fallback: legacyBaseline)
-        self.ddChartHoursByProvider = Self.loadProviderDoubles(from: defaults, key: ddChartHoursKey, fallback: 24)
+        self.ddBaselinePercent = defaults.object(forKey: ddBaselinePercentKey) as? Double ?? 500
+        self.ddChartHours = defaults.object(forKey: ddChartHoursKey) as? Double ?? 6
         self.showResetLabels = defaults.object(forKey: showResetLabelsKey) as? Bool ?? true
         self.use24HourTime = defaults.object(forKey: use24HourTimeKey) as? Bool ?? true
         self.showProviderLabels = defaults.object(forKey: showProviderLabelsKey) as? Bool ?? false
@@ -228,10 +188,28 @@ final class ColorSettings: ObservableObject {
     func resetToDefaults() {
         for provider in ProviderID.allCases {
             providerColors[provider] = provider.defaultAccentColor
+            enabledProviders[provider] = true
         }
         appBackgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1.0)
         defaults.set(appBackgroundColor.toHex(), forKey: backgroundColorKey)
         save()
+        dismissOnMouseExit = true
+        rememberLastView = false
+        showResetLabels = true
+        showProviderLabels = false
+        use24HourTime = true
+        refreshIntervalMinutes = 5
+        colorizeStatusIcon = false
+        maskSensitiveData = true
+        maskPercentage = 1.0
+        maskDomainOnly = false
+        showSensitiveInfo = true
+        showDowndetector = true
+        pinDowndetector = false
+        ddBaselinePercent = 500
+        ddChartHours = 6
+        showAlertDot = true
+        sendNotifications = true
     }
 
     func setAppBackgroundColor(_ color: NSColor) {
@@ -249,29 +227,6 @@ final class ColorSettings: ObservableObject {
         defaults.set(dict, forKey: storageKey)
     }
 
-    // MARK: - Per-provider double helpers
-
-    private static func loadProviderDoubles(from defaults: UserDefaults, key: String, fallback: Double) -> [ProviderID: Double] {
-        var result: [ProviderID: Double] = [:]
-        if let dict = defaults.dictionary(forKey: key) as? [String: Double] {
-            for provider in ProviderID.allCases {
-                result[provider] = dict[provider.rawValue] ?? fallback
-            }
-        } else {
-            for provider in ProviderID.allCases {
-                result[provider] = fallback
-            }
-        }
-        return result
-    }
-
-    private func saveProviderDoubles(_ values: [ProviderID: Double], key: String) {
-        var dict: [String: Double] = [:]
-        for (provider, val) in values {
-            dict[provider.rawValue] = val
-        }
-        defaults.set(dict, forKey: key)
-    }
 }
 
 // MARK: - NSColor hex helpers
