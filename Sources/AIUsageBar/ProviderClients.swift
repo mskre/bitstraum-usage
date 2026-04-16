@@ -49,14 +49,14 @@ struct ScriptBackedProviderClient: ProviderClient {
             let rem = r.remaining ?? (total - (r.used ?? 0))
             let frac = (rem / total).bounded(to: 0...1)
             limits.append(UsageLimit(
-                id: "primary", label: r.headline ?? "\(id.shortTitle) usage",
+                id: "primary", label: r.headline ?? "\(id.title) usage",
                 remaining: rem, total: total, fraction: frac, resetLabel: r.resetText
             ))
         }
 
         return ProviderUsageCard(
             id: id,
-            planName: r.planName?.trimmedNonEmpty ?? id.shortTitle,
+            planName: r.planName?.trimmedNonEmpty ?? id.title,
             statusMessage: r.statusMessage?.trimmedNonEmpty ?? "OK",
             limits: limits, state: .ready,
             lastUpdated: Date(), authenticated: true,
@@ -65,32 +65,291 @@ struct ScriptBackedProviderClient: ProviderClient {
     }
 }
 
+/// Fetches Claude usage via the Anthropic API using Claude Code OAuth credentials.
+@MainActor
+struct ClaudeAPIClient: ProviderClient {
+    let id: ProviderID = .claude
+
+    func refresh(using automation: WebAutomationService) async throws -> ProviderUsageCard {
+        guard let creds = KeychainHelper.readClaudeCodeCredentials() else {
+            throw ProviderError.authRequired("Install Claude Code and run `claude` to authenticate")
+        }
+        guard KeychainHelper.isTokenValid(creds) else {
+            throw ProviderError.authRequired("Claude Code token expired -- run `claude` to refresh")
+        }
+
+        let planName = KeychainHelper.planName(from: creds)
+        let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+        let accountURL = URL(string: "https://api.anthropic.com/api/oauth/account")!
+
+        let usageRequest: URLRequest = {
+            var request = URLRequest(url: usageURL)
+            request.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            request.setValue("claude-cli/2.1.80 (external, cli)", forHTTPHeaderField: "User-Agent")
+            request.timeoutInterval = 10
+            return request
+        }()
+
+        let accountRequest: URLRequest = {
+            var request = URLRequest(url: accountURL)
+            request.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            request.setValue("claude-cli/2.1.80 (external, cli)", forHTTPHeaderField: "User-Agent")
+            request.timeoutInterval = 10
+            return request
+        }()
+
+        async let usageResult = URLSession.shared.data(for: usageRequest)
+        async let accountResult = URLSession.shared.data(for: accountRequest)
+
+        let (data, response) = try await usageResult
+
+        guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw ProviderError.invalidPayload("API returned \(status)")
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ProviderError.invalidPayload("Invalid JSON from usage API")
+        }
+
+        var limits: [UsageLimit] = []
+
+        let sections: [(key: String, label: String)] = [
+            ("five_hour", "Current session"),
+            ("seven_day", "Current week (all models)"),
+            ("seven_day_sonnet", "Current week (Sonnet only)"),
+        ]
+
+        for (key, label) in sections {
+            guard let section = json[key] as? [String: Any],
+                  let utilization = section["utilization"] as? Double else { continue }
+
+            let fraction = (utilization / 100).clamped(to: 0...1)
+            var resetLabel: String? = nil
+            if let resetsAt = section["resets_at"] as? String,
+               let date = parseISO8601Date(resetsAt) {
+                let formatter = RelativeDateTimeFormatter()
+                formatter.unitsStyle = .full
+                resetLabel = "Resets \(formatter.localizedString(for: date, relativeTo: Date()))"
+            }
+
+            limits.append(UsageLimit(
+                id: key, label: label,
+                remaining: nil, total: nil,
+                fraction: fraction, resetLabel: resetLabel
+            ))
+        }
+
+        var email: String? = nil
+        if let (accountData, accountResponse) = try? await accountResult,
+           let httpResp = accountResponse as? HTTPURLResponse,
+           httpResp.statusCode == 200,
+           let accountJSON = try? JSONSerialization.jsonObject(with: accountData) as? [String: Any] {
+            email = accountJSON["email_address"] as? String
+        }
+
+        return ProviderUsageCard(
+            id: .claude,
+            planName: planName,
+            statusMessage: "Live",
+            limits: limits, state: .ready,
+            lastUpdated: Date(), authenticated: true,
+            email: email
+        )
+    }
+}
+
+@MainActor
+struct OpenAICodexClient: ProviderClient {
+    let id: ProviderID = .chatgpt
+
+    func refresh(using automation: WebAutomationService) async throws -> ProviderUsageCard {
+        guard OpenAIAuthHelper.readCodexCredentials() != nil else {
+            throw ProviderError.authRequired("Install Codex and sign in with ChatGPT")
+        }
+        let creds = try await OpenAIAuthHelper.refreshCodexCredentialsIfNeeded()
+
+        let url = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(creds.accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+        request.setValue("codex-cli/0.120.0", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 10
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw ProviderError.invalidPayload("OpenAI usage API returned \(status)")
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ProviderError.invalidPayload("Invalid JSON from OpenAI usage API")
+        }
+
+        let planType = (json["plan_type"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? creds.planType
+        let planName = OpenAIAuthHelper.planDisplayName(fromPlanType: planType)
+        var limits: [UsageLimit] = []
+
+        if let rateLimit = json["rate_limit"] as? [String: Any] {
+            if let primary = rateLimit["primary_window"] as? [String: Any],
+               let usedPercent = primary["used_percent"] as? Double {
+                let windowSeconds = primary["limit_window_seconds"] as? Double
+                let resetAfter = primary["reset_after_seconds"] as? Double
+                limits.append(UsageLimit(
+                    id: "primary",
+                    label: formatWindowLabel(windowSeconds),
+                    remaining: nil,
+                    total: nil,
+                    fraction: (usedPercent / 100).clamped(to: 0...1),
+                    resetLabel: formatResetLabel(resetAfter)
+                ))
+            }
+
+            if let secondary = rateLimit["secondary_window"] as? [String: Any],
+               let usedPercent = secondary["used_percent"] as? Double {
+                let resetAfter = secondary["reset_after_seconds"] as? Double
+                limits.append(UsageLimit(
+                    id: "secondary",
+                    label: "Weekly limit",
+                    remaining: nil,
+                    total: nil,
+                    fraction: (usedPercent / 100).clamped(to: 0...1),
+                    resetLabel: formatResetLabel(resetAfter)
+                ))
+            }
+        }
+
+        if let additional = json["additional_rate_limits"] as? [[String: Any]] {
+            for item in additional {
+                let limitName = (item["limit_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let name = limitName, !name.isEmpty,
+                      let rateLimit = item["rate_limit"] as? [String: Any] else { continue }
+
+                if let primary = rateLimit["primary_window"] as? [String: Any],
+                   let usedPercent = primary["used_percent"] as? Double {
+                    let windowSeconds = primary["limit_window_seconds"] as? Double
+                    let resetAfter = primary["reset_after_seconds"] as? Double
+                    limits.append(UsageLimit(
+                        id: name.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression) + "-primary",
+                        label: "\(name) \(formatWindowSuffix(windowSeconds))",
+                        remaining: nil,
+                        total: nil,
+                        fraction: (usedPercent / 100).clamped(to: 0...1),
+                        resetLabel: formatResetLabel(resetAfter)
+                    ))
+                }
+
+                if let secondary = rateLimit["secondary_window"] as? [String: Any],
+                   let usedPercent = secondary["used_percent"] as? Double {
+                    let resetAfter = secondary["reset_after_seconds"] as? Double
+                    limits.append(UsageLimit(
+                        id: name.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression) + "-secondary",
+                        label: "\(name) Weekly",
+                        remaining: nil,
+                        total: nil,
+                        fraction: (usedPercent / 100).clamped(to: 0...1),
+                        resetLabel: formatResetLabel(resetAfter)
+                    ))
+                }
+            }
+        }
+
+        return ProviderUsageCard(
+            id: .chatgpt,
+            planName: planName,
+            statusMessage: limits.isEmpty ? "Codex connected" : "Live",
+            limits: limits,
+            state: .ready,
+            lastUpdated: Date(),
+            authenticated: true,
+            email: (json["email"] as? String) ?? creds.email
+        )
+    }
+
+    private func formatWindowLabel(_ seconds: Double?) -> String {
+        let suffix = formatWindowSuffix(seconds)
+        return suffix.isEmpty ? "Usage limit" : "\(suffix) limit"
+    }
+
+    private func formatWindowSuffix(_ seconds: Double?) -> String {
+        guard let seconds, seconds > 0 else { return "" }
+        let hours = Int((seconds / 3600).rounded())
+        if hours < 24 { return "\(hours)h" }
+        let days = Int((Double(hours) / 24).rounded())
+        return "\(days)d"
+    }
+
+    private func formatResetLabel(_ seconds: Double?) -> String? {
+        guard let seconds, seconds > 0 else { return nil }
+        let minutes = Int((seconds / 60).rounded())
+        if minutes < 60 { return "Resets in \(minutes) min" }
+        let hours = minutes / 60
+        let remMinutes = minutes % 60
+        if hours < 24 { return "Resets in \(hours)h \(remMinutes)m" }
+        let days = hours / 24
+        let remHours = hours % 24
+        return "Resets in \(days)d \(remHours)h" }
+}
+
+private extension Double {
+    func clamped(to range: ClosedRange<Double>) -> Double {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
+private func parseISO8601Date(_ value: String) -> Date? {
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = fractional.date(from: value) {
+        return date
+    }
+
+    let plain = ISO8601DateFormatter()
+    plain.formatOptions = [.withInternetDateTime]
+    return plain.date(from: value)
+}
+
 enum ProviderFactory {
-    static func makeAll() -> [ProviderID: any ProviderClient] {
-        [
-            .chatgpt: ScriptBackedProviderClient(id: .chatgpt, script: ProviderScripts.chatGPT, navigateTo: ProviderID.chatgpt.usageURL, waitForDOM: false),
-            .claude: ScriptBackedProviderClient(id: .claude, script: ProviderScripts.claude, navigateTo: ProviderID.claude.usageURL),
-            // .gemini: ScriptBackedProviderClient(id: .gemini, script: ProviderScripts.gemini, navigateTo: ProviderID.gemini.usageURL),
-            // .openrouter: ScriptBackedProviderClient(id: .openrouter, script: ProviderScripts.openRouter, navigateTo: ProviderID.openrouter.usageURL),
+    @MainActor static func makeAll() -> [ProviderID: any ProviderClient] {
+        let chatGPTClient: any ProviderClient
+        if OpenAIAuthHelper.readCodexCredentials() != nil {
+            chatGPTClient = OpenAICodexClient()
+        } else {
+            chatGPTClient = ScriptBackedProviderClient(id: .chatgpt, script: ProviderScripts.chatGPT, navigateTo: ProviderID.chatgpt.usageURL, waitForDOM: false)
+        }
+
+        // For Claude: use the API client if Claude Code credentials exist, otherwise fall back to browser scraping
+        let claudeClient: any ProviderClient
+        if KeychainHelper.readClaudeCodeCredentials() != nil {
+            claudeClient = ClaudeAPIClient()
+        } else {
+            claudeClient = ScriptBackedProviderClient(
+                id: .claude, script: ProviderScripts.claude,
+                navigateTo: ProviderID.claude.usageURL
+            )
+        }
+
+        return [
+            .chatgpt: chatGPTClient,
+            .claude: claudeClient,
         ]
     }
 }
 
-// MARK: - Shared scraping logic injected into all DOM-based scripts.
-// No hardcoded plan names, section headers, or provider-specific skip lists.
-// Everything is pattern-matched dynamically from whatever the page contains.
+// MARK: - DOM extraction scripts for provider usage pages
 
 enum ProviderScripts {
 
-    /// Generic DOM scraper. Finds all "X% <keyword>" patterns in page text,
-    /// grabs the nearest preceding text as a label, and the nearest following
-    /// reset/renewal line. Plan name is extracted from the first line that looks
-    /// like a plan descriptor (contains parentheses with multiplier, or sits
-    /// near the word "plan").
+    /// Builds a JS script that extracts usage percentages, labels, and
+    /// reset times from a provider's usage page.
     ///
-    /// `pctKeywords` is a regex fragment like "igjen|remaining|left" or "used".
-    /// `fractionFromPct` is a JS expression: either `pct / 100` (for "remaining")
-    /// or `(100 - pct) / 100` (for "used").
+    /// - Parameters:
+    ///   - pctKeywords: Regex fragment matching the keyword after a percentage (e.g. "used", "remaining").
+    ///   - fractionExpr: JS expression converting the parsed percentage to a 0-1 fraction.
     private static func domScraper(pctKeywords: String, fractionExpr: String, fallbackPlan: String, emailFetchScript: String? = nil) -> String {
         // Double-escaped: Swift \\\\d → string value \\d → JS new RegExp("\\d") → regex \d
         let pctRegex = "(\\\\d{1,3})\\\\s*%\\\\s*(\(pctKeywords))"
@@ -389,7 +648,7 @@ enum ProviderScripts {
     static let claude: String = domScraper(
         pctKeywords: "used",
         fractionExpr: "pct / 100",
-        fallbackPlan: "Claude",
+        fallbackPlan: "Anthropic",
         emailFetchScript: """
         try {
           var acctResp = await fetch("https://claude.ai/api/account", { credentials: "include" });
@@ -401,51 +660,4 @@ enum ProviderScripts {
         """
     )
 
-    // Gemini: no known usage counter, just detect sign-in state
-    static let gemini = #"""
-    try {
-      var text = "";
-      try { text = document.body.innerText || ""; } catch(e) { text = ""; }
-      if (text.length < 100) {
-        return JSON.stringify({ authenticated: false, statusMessage: "Gemini login required" });
-      }
-
-      // Dynamic plan detection
-      var plan = "Gemini";
-      var pm = text.match(/[A-Za-z]+\s*\(\d+x\)/);
-      if (pm) { plan = pm[0]; }
-      else {
-        pm = text.match(/[A-Za-z]+\s+plan\b/i);
-        if (pm) { plan = pm[0]; }
-      }
-
-      return JSON.stringify({
-        authenticated: true, planName: plan, statusMessage: "Connected",
-        limits: [{ id: "plan", label: plan + " active", remaining: null, total: null, fraction: null, resetLabel: "No usage counter exposed by this provider" }]
-      });
-    } catch(e) {
-      return JSON.stringify({ authenticated: false, statusMessage: "Error: " + String(e) });
-    }
-    """#
-
-    // OpenRouter: direct API, no DOM scraping needed
-    static let openRouter = #"""
-    try {
-      var resp = await fetch("https://openrouter.ai/api/v1/credits", { credentials: "include" });
-      if (resp.status === 401) return JSON.stringify({ authenticated: false, statusMessage: "OpenRouter login required" });
-      if (!resp.ok) return JSON.stringify({ authenticated: true, statusMessage: "HTTP " + resp.status, limits: [] });
-      var json = await resp.json();
-      var d = json.data || json;
-      var total = Number(d.total_credits || d.total || 0);
-      var used = Number(d.total_usage || d.used || 0);
-      var rem = Math.max(total - used, 0);
-      var frac = total > 0 ? rem / total : null;
-      return JSON.stringify({
-        authenticated: true, planName: "OpenRouter", statusMessage: "Live",
-        limits: [{ id: "credits", label: "$" + rem.toFixed(2) + " remaining", remaining: rem, total: total, fraction: frac, resetLabel: "$" + used.toFixed(2) + " used of $" + total.toFixed(2) }]
-      });
-    } catch(e) {
-      return JSON.stringify({ authenticated: false, statusMessage: "Error: " + String(e) });
-    }
-    """#
 }

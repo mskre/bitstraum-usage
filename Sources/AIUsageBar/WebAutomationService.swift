@@ -2,8 +2,7 @@ import AppKit
 import Foundation
 import WebKit
 
-/// Manages one persistent WKWebView per provider.
-/// The same webview is used for sign-in AND polling -- no cookie transfer needed.
+/// Manages one persistent WKWebView per provider for sign-in and data fetching.
 @MainActor
 final class WebAutomationService: NSObject {
     private var webViews: [ProviderID: WKWebView] = [:]
@@ -164,19 +163,33 @@ final class WebAutomationService: NSObject {
 
         // Wait for SPA content to render (only for DOM scrapers, not API fetchers)
         if waitForDOM {
-            for _ in 0..<30 {
-                try? await Task.sleep(for: .seconds(1))
-                let found = try? await wv.evaluateJavaScript(
-                    "(/\\d{1,3}\\s*%\\s*(igjen|remaining|left|used)/i).test(document.body.innerText)"
-                )
-                if found as? Bool == true { break }
+            // Check early if we landed on a login page (no session) -- bail fast
+            try? await Task.sleep(for: .seconds(3))
+            let pageText = try? await wv.evaluateJavaScript("document.body?.innerText?.substring(0, 500) || ''") as? String
+            let looksLikeLogin = pageText.map { text in
+                text.contains("Sign in") || text.contains("sign up") || text.contains("Log in") || text.contains("Continue with") || text.contains("Get started")
+            } ?? false
+            let hasUsageData = pageText.map { text in
+                text.range(of: #"\d{1,3}\s*%\s*(igjen|remaining|left|used)"#, options: .regularExpression) != nil
+            } ?? false
+
+            if !looksLikeLogin && !hasUsageData {
+                // Not a login page but no data yet -- wait a bit more
+                for _ in 0..<10 {
+                    try? await Task.sleep(for: .seconds(1))
+                    let found = try? await wv.evaluateJavaScript(
+                        "(/\\d{1,3}\\s*%\\s*(igjen|remaining|left|used)/i).test(document.body.innerText)"
+                    )
+                    if found as? Bool == true { break }
+                }
             }
+            // If it's a login page, we skip waiting and let the script detect unauthenticated state
         } else {
             // Brief pause for page JS to initialize
             try? await Task.sleep(for: .seconds(2))
         }
 
-        // Run the scraping script
+        // Run the extraction script
         let result = try await wv.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
 
         // Restore sign-in delegate if window is still open
@@ -190,6 +203,8 @@ final class WebAutomationService: NSObject {
 
         return string
     }
+
+
 }
 
 // MARK: - Detects when user completes sign-in by watching URL changes

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import UserNotifications
 
 @MainActor
 @main
@@ -27,7 +28,14 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         configureStatusItem()
         configurePanel()
         bindStore()
+        setupNotifications()
         store.start()
+
+        // Pre-generate the color wheel image in the background so
+        // the color picker opens instantly on first click.
+        DispatchQueue.global(qos: .utility).async {
+            let _ = ColorWheelImageCache.image(diameter: 190, brightness: 1)
+        }
     }
 
     private func configureAppIcon() {
@@ -151,6 +159,40 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         colorSettings.$colorizeStatusIcon
             .sink { [weak self] enabled in self?.previewView?.colorizeIcon = enabled }
             .store(in: &cancellables)
+        store.$downdetectorData
+            .sink { [weak self] data in self?.previewView?.downdetectorData = data }
+            .store(in: &cancellables)
+        colorSettings.$ddRecencyByProvider
+            .sink { [weak self] val in self?.previewView?.ddRecencyByProvider = val }
+            .store(in: &cancellables)
+        colorSettings.$ddBaselineByProvider
+            .sink { [weak self] val in self?.previewView?.ddBaselineByProvider = val }
+            .store(in: &cancellables)
+        colorSettings.$showDowndetector
+            .sink { [weak self] val in self?.previewView?.showDowndetector = val }
+            .store(in: &cancellables)
+        colorSettings.$showAlertDot
+            .sink { [weak self] val in self?.previewView?.showAlertDot = val }
+            .store(in: &cancellables)
+        colorSettings.$enabledProviders
+            .sink { [weak self] val in self?.previewView?.enabledProviders = val }
+            .store(in: &cancellables)
+        colorSettings.$showProviderLabels
+            .sink { [weak self] val in self?.previewView?.showProviderLabels = val }
+            .store(in: &cancellables)
+        popoverController.$preferredSize
+            .sink { [weak self] size in
+                guard let self, size.width > 0, size.height > 0 else { return }
+                let current = self.popover.contentSize
+                let dw = abs(size.width - current.width)
+                let dh = abs(size.height - current.height)
+                // Only resize/reposition if the size changed meaningfully
+                // to prevent micro-shifts while dragging sliders
+                guard dw > 5 || dh > 5 else { return }
+                self.popover.contentSize = NSSize(width: size.width, height: size.height)
+                self.clampPopoverToVisibleScreen()
+            }
+            .store(in: &cancellables)
 
         NotificationCenter.default.addObserver(
             forName: .signInCompleted,
@@ -174,8 +216,6 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .environmentObject(colorSettings)
             .environmentObject(popoverController)
         let controller = NSHostingController(rootView: rootView)
-        controller.view.frame.size = controller.view.fittingSize
-
         popover.contentViewController = controller
         popover.behavior = .transient
         popover.animates = true
@@ -183,6 +223,23 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popoverController.close = { [weak self] in
             self?.popover.performClose(nil)
         }
+    }
+
+    func popoverShouldClose(_ popover: NSPopover) -> Bool {
+        // Only intercept ESC key, not focus loss (clicking away should always close)
+        guard NSApp.currentEvent?.type == .keyDown,
+              NSApp.currentEvent?.keyCode == 53 else { return true }
+
+        // ESC navigates back through views before closing
+        if popoverController.showSettings {
+            popoverController.showSettings = false
+            return false
+        }
+        if popoverController.showDowndetector {
+            popoverController.showDowndetector = false
+            return false
+        }
+        return true
     }
 
     func popoverWillClose(_ notification: Notification) {
@@ -205,5 +262,123 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let button = statusItem.button else { return }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        Task { @MainActor in
+            self.clampPopoverToVisibleScreen()
+        }
+    }
+
+    private func clampPopoverToVisibleScreen() {
+        guard let window = popover.contentViewController?.view.window else { return }
+        let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        guard !visible.isEmpty else { return }
+
+        var frame = window.frame
+
+        if frame.width > visible.width {
+            frame.size.width = visible.width - 20
+        }
+        if frame.height > visible.height {
+            frame.size.height = visible.height - 20
+        }
+
+        if frame.minX < visible.minX {
+            frame.origin.x = visible.minX
+        }
+        if frame.maxX > visible.maxX {
+            frame.origin.x = visible.maxX - frame.width
+        }
+        if frame.minY < visible.minY {
+            frame.origin.y = visible.minY
+        }
+        if frame.maxY > visible.maxY {
+            frame.origin.y = visible.maxY - frame.height
+        }
+
+        window.setFrame(frame, display: true)
+    }
+
+    // MARK: - Notifications
+
+    private var activeAlerts: Set<String> = []
+
+    private func setupNotifications() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+
+        // Monitor downdetector changes
+        store.$downdetectorData
+            .sink { [weak self] data in
+                guard let self else { return }
+                self.checkForAlerts(cards: self.store.cards, downdetector: data)
+            }
+            .store(in: &cancellables)
+
+        // Monitor usage changes
+        store.$cards
+            .sink { [weak self] cards in
+                guard let self else { return }
+                self.checkForAlerts(cards: cards, downdetector: self.store.downdetectorData)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func checkForAlerts(cards: [ProviderUsageCard], downdetector: [ProviderID: DowndetectorReport]) {
+        guard colorSettings.sendNotifications else {
+            activeAlerts.removeAll()
+            return
+        }
+
+        // Check low usage
+        for card in cards where card.authenticated {
+            let key = "usage-\(card.id.rawValue)"
+            if let frac = card.bestFraction, frac >= 0.9 {
+                if !activeAlerts.contains(key) {
+                    activeAlerts.insert(key)
+                    let pctLeft = Int(((1 - frac) * 100).rounded())
+                    sendNotification(
+                        title: "\(card.id.title) usage low",
+                        body: "Only \(pctLeft)% remaining"
+                    )
+                }
+            } else {
+                activeAlerts.remove(key)
+            }
+        }
+
+        // Check downdetector
+        if colorSettings.showDowndetector {
+            for provider in ProviderID.allCases {
+                let key = "dd-\(provider.rawValue)"
+                if let report = downdetector[provider] {
+                    let status = report.effectiveStatus(
+                        recencyMinutes: colorSettings.recencyMinutes(for: provider),
+                        baselinePercent: colorSettings.baselinePercent(for: provider)
+                    )
+                    if status.hasProblems {
+                        if !activeAlerts.contains(key) {
+                            activeAlerts.insert(key)
+                            sendNotification(
+                                title: "\(provider.title): \(status.label)",
+                                body: "Downdetector reports issues with \(provider.title)"
+                            )
+                        }
+                    } else {
+                        activeAlerts.remove(key)
+                    }
+                }
+            }
+        }
+    }
+
+    private func sendNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 }

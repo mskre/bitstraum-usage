@@ -4,16 +4,6 @@ extension Notification.Name {
     static let signInCompleted = Notification.Name("signInCompleted")
 }
 
-enum CurrencyFormatter {
-    static let dollars: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .currency
-        formatter.currencyCode = "USD"
-        formatter.maximumFractionDigits = 2
-        return formatter
-    }()
-}
-
 extension Comparable {
     func bounded(to range: ClosedRange<Self>) -> Self {
         min(max(self, range.lowerBound), range.upperBound)
