@@ -4,24 +4,22 @@ import Foundation
 enum ProviderID: String, CaseIterable, Codable, Identifiable {
     case chatgpt
     case claude
-    // case gemini      // no usage counter exposed
-    // case openrouter  // no usage counter exposed
-
     static var allCases: [ProviderID] { [.chatgpt, .claude] }
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .chatgpt: return "ChatGPT"
-        case .claude: return "Claude"
+        case .chatgpt: return "OpenAI"
+        case .claude: return "Anthropic"
         }
     }
 
-    var shortTitle: String {
+    /// Single letter for the menu bar icon label.
+    var iconLetter: String {
         switch self {
-        case .chatgpt: return "GPT"
-        case .claude: return "Claude"
+        case .chatgpt: return "O"
+        case .claude: return "A"
         }
     }
 
@@ -31,9 +29,6 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
         case .claude: return NSColor(calibratedRed: 0.95, green: 0.50, blue: 0.19, alpha: 1.0)
         }
     }
-
-    /// Alias kept for compatibility; views should prefer ColorSettings for user-customized colors.
-    var accentColor: NSColor { defaultAccentColor }
 
     var loginURL: URL {
         switch self {
@@ -46,6 +41,14 @@ enum ProviderID: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .chatgpt: return URL(string: "https://chatgpt.com/codex/cloud/settings/analytics")!
         case .claude: return URL(string: "https://claude.ai/settings/usage")!
+        }
+    }
+
+    /// Slug used on downdetector.com, e.g. "claude-ai" → downdetector.com/status/claude-ai/
+    var downdetectorSlug: String? {
+        switch self {
+        case .chatgpt: return "openai"
+        case .claude: return "claude-ai"
         }
     }
 }
@@ -101,9 +104,7 @@ struct ProviderScrapeResult: Decodable {
     var used: Double?
     var total: Double?
     var headline: String?
-    var footer: String?
     var resetText: String?
-    var remainingFraction: Double?
     var email: String?
 }
 

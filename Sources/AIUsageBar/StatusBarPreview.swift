@@ -19,6 +19,29 @@ final class StatusBarPreviewView: NSView {
     var colorizeIcon = false {
         didSet { updateIcon() }
     }
+    var downdetectorData: [ProviderID: DowndetectorReport] = [:] {
+        didSet { updateIcon() }
+    }
+    var ddRecencyByProvider: [ProviderID: Double] = [:] {
+        didSet { updateIcon() }
+    }
+    var ddBaselineByProvider: [ProviderID: Double] = [:] {
+        didSet { updateIcon() }
+    }
+    var showDowndetector: Bool = true {
+        didSet { updateIcon() }
+    }
+    var showAlertDot: Bool = true {
+        didSet { updateIcon() }
+    }
+    var enabledProviders: [ProviderID: Bool] = [:] {
+        didSet { updateIcon() }
+    }
+    var showProviderLabels: Bool = false {
+        didSet { updateIcon() }
+    }
+    /// Usage fraction above which the red alert dot appears (e.g. 0.9 = 90% used).
+    var alertUsageThreshold: CGFloat = 0.9
     private var lastKnownFractions: [ProviderID: CGFloat] = [:]
 
     private weak var button: NSStatusBarButton?
@@ -28,10 +51,41 @@ final class StatusBarPreviewView: NSView {
         updateIcon()
     }
 
+    /// Returns the alert color for a specific provider, or nil if no alert.
+    private func alertColor(for provider: ProviderID) -> NSColor? {
+        // Check low usage
+        if let card = cards.first(where: { $0.id == provider }), card.authenticated,
+           let frac = card.bestFraction, CGFloat(frac) >= alertUsageThreshold {
+            return .red
+        }
+        // Check Downdetector
+        if showDowndetector, let report = downdetectorData[provider] {
+            let status = report.effectiveStatus(
+                recencyMinutes: ddRecencyByProvider[provider] ?? 30,
+                baselinePercent: ddBaselineByProvider[provider] ?? 200
+            )
+            switch status {
+            case .danger: return .red
+            case .warning: return .orange
+            default: break
+            }
+        }
+        return nil
+    }
+
+    private var hasAnyAlert: Bool {
+        ProviderID.allCases.contains { alertColor(for: $0) != nil }
+    }
+
     private func updateIcon() {
         guard let button else { return }
 
-        let providers = ProviderID.allCases
+        let providers = ProviderID.allCases.filter { enabledProviders[$0] ?? true }
+        guard !providers.isEmpty else {
+            button.image = nil
+            return
+        }
+        let alert = showAlertDot && hasAnyAlert
 
         // Battery-style bars stacked vertically
         let barW: CGFloat = 16
@@ -39,9 +93,13 @@ final class StatusBarPreviewView: NSView {
         let gap: CGFloat = 2
         let pad: CGFloat = 2
         let lineW: CGFloat = 1.0
+        let dotSize: CGFloat = 5
 
-        let totalH = CGFloat(providers.count) * barH + CGFloat(providers.count - 1) * gap
-        let imgW = barW + pad * 2
+        // Use fixed dimensions based on ALL providers to prevent icon bouncing
+        let allCount = CGFloat(ProviderID.allCases.count)
+        let totalH = allCount * barH + (allCount - 1) * gap
+        let labelW: CGFloat = showProviderLabels ? 10 : 0
+        let imgW = labelW + barW + pad * 2 + dotSize + 1
         let imgH: CGFloat = 18
         let size = NSSize(width: imgW, height: imgH)
 
@@ -55,7 +113,25 @@ final class StatusBarPreviewView: NSView {
 
                 // Top provider first (index 0 at top)
                 let y = originY + CGFloat(providers.count - 1 - i) * (barH + gap)
-                let outerRect = NSRect(x: pad, y: y, width: barW, height: barH)
+                let barX = pad + labelW
+                let outerRect = NSRect(x: barX, y: y, width: barW, height: barH)
+
+                // Provider letter label
+                if self.showProviderLabels {
+                    let isTemplate = !self.colorizeIcon && !alert
+                    let labelColor: NSColor = isTemplate
+                        ? NSColor.black.withAlphaComponent(0.85)  // Template: alpha channel is what matters
+                        : NSColor.white.withAlphaComponent(0.85)  // Non-template: need visible color
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: 8, weight: .semibold),
+                        .foregroundColor: labelColor
+                    ]
+                    let letter = NSAttributedString(string: provider.iconLetter, attributes: attrs)
+                    let letterSize = letter.size()
+                    let letterX = pad + (labelW - letterSize.width) / 2 - 1
+                    let letterY = y + (barH - letterSize.height) / 2
+                    letter.draw(at: NSPoint(x: letterX, y: letterY))
+                }
                 let radius = barH / 2
 
                 // Outline
@@ -85,10 +161,24 @@ final class StatusBarPreviewView: NSView {
                 }
             }
 
+            // Per-provider alert dots to the right of each bar
+            if self.showAlertDot {
+                for (i, provider) in providers.enumerated() {
+                    if let color = self.alertColor(for: provider) {
+                        let y = originY + CGFloat(providers.count - 1 - i) * (barH + gap)
+                        let dotX = pad + labelW + barW + 2
+                        let dotY = y + (barH - dotSize) / 2
+                        let dotRect = NSRect(x: dotX, y: dotY, width: dotSize, height: dotSize)
+                        color.setFill()
+                        NSBezierPath(ovalIn: dotRect).fill()
+                    }
+                }
+            }
+
             return true
         }
 
-        image.isTemplate = !colorizeIcon
+        image.isTemplate = !colorizeIcon && !alert
         button.image = image
         button.imagePosition = .imageOnly
     }
