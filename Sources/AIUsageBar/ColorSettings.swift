@@ -101,6 +101,11 @@ final class ColorSettings: ObservableObject {
         didSet { defaults.set(showResetLabels, forKey: showResetLabelsKey) }
     }
 
+    /// Use 24-hour time format (default true).
+    @Published var use24HourTime: Bool {
+        didSet { defaults.set(use24HourTime, forKey: use24HourTimeKey) }
+    }
+
     /// Show provider letter labels (O, A) next to bars in the menu bar icon.
     @Published var showProviderLabels: Bool {
         didSet { defaults.set(showProviderLabels, forKey: showProviderLabelsKey) }
@@ -150,6 +155,7 @@ final class ColorSettings: ObservableObject {
     private let ddBaselineByProviderKey = "ddBaselineByProvider"
     private let ddChartHoursKey = "ddChartHoursByProvider"
     private let showResetLabelsKey = "showResetLabels"
+    private let use24HourTimeKey = "use24HourTime"
     private let showProviderLabelsKey = "showProviderLabels"
     private let enabledProvidersKey = "enabledProviders"
     private let showAlertDotKey = "showAlertDot"
@@ -190,6 +196,7 @@ final class ColorSettings: ObservableObject {
         self.ddBaselineByProvider = Self.loadProviderDoubles(from: defaults, key: ddBaselineByProviderKey, fallback: legacyBaseline)
         self.ddChartHoursByProvider = Self.loadProviderDoubles(from: defaults, key: ddChartHoursKey, fallback: 24)
         self.showResetLabels = defaults.object(forKey: showResetLabelsKey) as? Bool ?? true
+        self.use24HourTime = defaults.object(forKey: use24HourTimeKey) as? Bool ?? true
         self.showProviderLabels = defaults.object(forKey: showProviderLabelsKey) as? Bool ?? false
         var ep: [ProviderID: Bool] = [:]
         if let dict = defaults.dictionary(forKey: enabledProvidersKey) as? [String: Bool] {
