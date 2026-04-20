@@ -219,6 +219,11 @@ final class ColorSettings: ObservableObject {
         defaults.set(normalized, forKey: backgroundColorKey)
     }
 
+    var downdetectorFreshnessInterval: TimeInterval {
+        let refreshSeconds = refreshIntervalMinutes * 60
+        return min(max(refreshSeconds * 2, 300), 900)
+    }
+
     private func save() {
         var dict: [String: String] = [:]
         for (provider, color) in providerColors {

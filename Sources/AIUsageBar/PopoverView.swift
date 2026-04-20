@@ -303,7 +303,7 @@ struct ProviderCardView: View {
                 Spacer()
 
                 if card.state == .unauthenticated || card.state == .error {
-                    Button("Sign In") { signInAction() }
+                    Button(actionTitle) { signInAction() }
                         .buttonStyle(.borderless)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(color)
@@ -318,11 +318,17 @@ struct ProviderCardView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if card.limits.isEmpty && card.state != .unauthenticated {
+            if card.limits.isEmpty {
                 if card.state == .loading {
-                    Text("Fetching usage data...")
+                    Text(card.statusMessage.isEmpty ? "Fetching usage data..." : card.statusMessage)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else if card.state == .unauthenticated || card.state == .error {
+                    Text(card.statusMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 } else if card.state == .ready && card.statusMessage.contains("Sign in") {
                     Button(card.statusMessage) { signInAction() }
                         .buttonStyle(.borderless)
@@ -342,8 +348,8 @@ struct ProviderCardView: View {
 
             // Downdetector status: show when pinned, or auto-show on recent problems
             if colorSettings.showDowndetector, let report = store.downdetectorData[card.id],
-               colorSettings.pinDowndetector || report.effectiveStatus(baselinePercent: colorSettings.ddBaselinePercent).hasProblems {
-                DowndetectorStatusView(report: report, providerSlug: card.id.downdetectorSlug ?? "", baselinePercent: colorSettings.ddBaselinePercent, chartHours: colorSettings.ddChartHours, use24HourTime: colorSettings.use24HourTime)
+               colorSettings.pinDowndetector || report.alertStatus(baselinePercent: colorSettings.ddBaselinePercent, staleAfter: colorSettings.downdetectorFreshnessInterval).hasProblems {
+                DowndetectorStatusView(report: report, providerSlug: card.id.downdetectorSlug ?? "", baselinePercent: colorSettings.ddBaselinePercent, chartHours: colorSettings.ddChartHours, use24HourTime: colorSettings.use24HourTime, staleAfter: colorSettings.downdetectorFreshnessInterval)
             }
         }
     }
@@ -368,6 +374,11 @@ struct ProviderCardView: View {
     private func displayEmail(_ email: String) -> String {
         guard colorSettings.maskSensitiveData else { return email }
         return maskEmail(email, percentage: colorSettings.maskPercentage, domainOnly: colorSettings.maskDomainOnly)
+    }
+
+    private var actionTitle: String {
+        if store.shouldShowReconnect(for: card) { return "Reconnect" }
+        return (card.id == .chatgpt || card.id == .claude) ? "Connect" : "Sign In"
     }
 }
 
@@ -1172,7 +1183,8 @@ struct DowndetectorTabView: View {
                             color: colorSettings.swiftUIColor(for: provider),
                             baselinePercent: colorSettings.ddBaselinePercent,
                             chartHours: colorSettings.ddChartHours,
-                            use24HourTime: colorSettings.use24HourTime
+                            use24HourTime: colorSettings.use24HourTime,
+                            staleAfter: colorSettings.downdetectorFreshnessInterval
                         )
                         .padding(.vertical, 8)
 
@@ -1211,6 +1223,7 @@ struct DowndetectorProviderSection: View {
     var baselinePercent: Double = 400
     var chartHours: Double = 24
     var use24HourTime: Bool = true
+    var staleAfter: TimeInterval = 600
 
     @State private var hoveredIndex: Int? = nil
 
@@ -1233,7 +1246,7 @@ struct DowndetectorProviderSection: View {
     }
 
     private var effectiveStatus: DowndetectorStatusLevel {
-        report.effectiveStatus(baselinePercent: baselinePercent)
+        report.alertStatus(baselinePercent: baselinePercent, staleAfter: staleAfter)
     }
 
     private var statusColor: Color {
@@ -1393,6 +1406,7 @@ struct DowndetectorStatusView: View {
     var baselinePercent: Double = 400
     var chartHours: Double = 24
     var use24HourTime: Bool = true
+    var staleAfter: TimeInterval = 600
 
     @State private var hoveredIndex: Int? = nil
 
@@ -1415,7 +1429,7 @@ struct DowndetectorStatusView: View {
     }
 
     private var effectiveStatus: DowndetectorStatusLevel {
-        report.effectiveStatus(baselinePercent: baselinePercent)
+        report.alertStatus(baselinePercent: baselinePercent, staleAfter: staleAfter)
     }
 
     private var statusColor: Color {

@@ -9,13 +9,39 @@ final class UsageStore: ObservableObject {
     @Published var downdetectorData: [ProviderID: DowndetectorReport] = [:]
 
     private let automation = WebAutomationService()
-    private let clients = ProviderFactory.makeAll()
     private let colorSettings = ColorSettings.shared
+    private let defaults: UserDefaults
     private var refreshTask: Task<Void, Never>?
+    private var signInTasks: [ProviderID: Task<Void, Never>] = [:]
+    private var signInTaskIDs: [ProviderID: UUID] = [:]
     private let locallySignedOutKey = "locallySignedOutProviders"
     private var locallySignedOutProviders: Set<ProviderID> = []
 
-    init() {
+    var externalCredentialWaitTimeout: TimeInterval = 30
+    var externalCredentialPollInterval: TimeInterval = 1
+    var claudeCredentialImport: () throws -> KeychainHelper.ClaudeCredentials? = {
+        try KeychainHelper.importClaudeCodeCredentials()
+    }
+    var waitForClaudeExternalCredentials: (TimeInterval, TimeInterval) async -> KeychainHelper.ClaudeCredentials? = { timeout, interval in
+        await KeychainHelper.waitForExternalCredentials(timeout: timeout, interval: interval) {
+            KeychainHelper.readClaudeCodeCredentials()
+        }
+    }
+    var openAICredentialImport: () throws -> OpenAIAuthHelper.Credentials? = {
+        try OpenAIAuthHelper.importCodexCredentials()
+    }
+    var waitForOpenAIExternalCredentials: (TimeInterval, TimeInterval) async -> OpenAIAuthHelper.Credentials? = { timeout, interval in
+        await KeychainHelper.waitForExternalCredentials(timeout: timeout, interval: interval) {
+            OpenAIAuthHelper.readCodexCredentials()
+        }
+    }
+    var embeddedBrowserSignIn: ((ProviderID, @escaping () -> Void) -> Void)?
+    var automationSignOutAction: ((ProviderID) async -> Void)?
+    var refreshSingleAction: ((ProviderID) async -> Void)?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+
         if let saved = UsagePersistence.load(), saved.count == ProviderID.allCases.count {
             let order = Dictionary(uniqueKeysWithValues: ProviderID.allCases.enumerated().map { ($0.element, $0.offset) })
             self.cards = saved.sorted { (order[$0.id] ?? 0) < (order[$1.id] ?? 0) }
@@ -23,18 +49,28 @@ final class UsageStore: ObservableObject {
             self.cards = ProviderID.allCases.map(ProviderUsageCard.placeholder)
         }
 
-        if let raw = UserDefaults.standard.array(forKey: locallySignedOutKey) as? [String] {
+        if let raw = defaults.array(forKey: locallySignedOutKey) as? [String] {
             self.locallySignedOutProviders = Set(raw.compactMap(ProviderID.init(rawValue:)))
         }
     }
 
-    /// Whether Claude Code credentials exist in the Keychain.
-    var hasClaudeCodeCredentials: Bool {
-        !locallySignedOutProviders.contains(.claude) && KeychainHelper.readClaudeCodeCredentials() != nil
+    var hasImportedClaudeCredentials: Bool {
+        !locallySignedOutProviders.contains(.claude) && KeychainHelper.readImportedClaudeCredentials() != nil
     }
 
-    var hasOpenAICodexCredentials: Bool {
-        !locallySignedOutProviders.contains(.chatgpt) && OpenAIAuthHelper.readCodexCredentials() != nil
+    var hasImportedOpenAICredentials: Bool {
+        !locallySignedOutProviders.contains(.chatgpt) && OpenAIAuthHelper.readImportedCodexCredentials() != nil
+    }
+
+    func shouldShowReconnect(for card: ProviderUsageCard) -> Bool {
+        guard card.state == .unauthenticated else { return false }
+
+        switch card.id {
+        case .claude:
+            return hasImportedClaudeCredentials
+        case .chatgpt:
+            return hasImportedOpenAICredentials
+        }
     }
 
     func start() {
@@ -54,29 +90,30 @@ final class UsageStore: ObservableObject {
         refreshTask = nil
     }
 
-    /// Sign in: for Claude, try API first (no browser needed if Claude Code exists).
-    /// Falls back to embedded browser if no Keychain credentials.
+    /// Sign in uses external credential resync for Claude/ChatGPT and browser auth for others.
     func signIn(to provider: ProviderID) {
         locallySignedOutProviders.remove(provider)
         persistLocallySignedOutProviders()
 
-        if provider == .chatgpt, hasOpenAICodexCredentials {
-            Task {
-                await refreshSingle(provider)
+        if provider == .chatgpt {
+            startSignInTask(for: provider) { [weak self] taskID in
+                await self?.resyncFromCodex(taskID: taskID)
             }
             return
         }
 
-        if provider == .claude, hasClaudeCodeCredentials {
-            // Use the API directly -- no browser needed
-            Task {
-                await refreshSingle(provider)
+        if provider == .claude {
+            startSignInTask(for: provider) { [weak self] taskID in
+                await self?.resyncFromClaudeCode(taskID: taskID)
             }
             return
         }
 
         // Fall back to embedded browser sign-in
-        automation.signIn(for: provider) { [weak self] in
+        let signIn = embeddedBrowserSignIn ?? { [automation] provider, onAuth in
+            automation.signIn(for: provider, onAuth: onAuth)
+        }
+        signIn(provider) { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 NotificationCenter.default.post(name: .signInCompleted, object: nil)
@@ -86,7 +123,18 @@ final class UsageStore: ObservableObject {
     }
 
     func signOut(from provider: ProviderID) async {
-        await automation.signOut(for: provider)
+        cancelSignInTask(for: provider)
+        if provider == .claude {
+            KeychainHelper.clearImportedClaudeCredentials()
+        }
+        if provider == .chatgpt {
+            OpenAIAuthHelper.clearImportedCodexCredentials()
+        }
+        if let automationSignOutAction {
+            await automationSignOutAction(provider)
+        } else {
+            await automation.signOut(for: provider)
+        }
         locallySignedOutProviders.insert(provider)
         persistLocallySignedOutProviders()
         if let i = cards.firstIndex(where: { $0.id == provider }) {
@@ -132,10 +180,10 @@ final class UsageStore: ObservableObject {
 
         // Collect providers to refresh: already authenticated + Claude if Keychain exists
         var toRefresh = Set(cards.filter { $0.authenticated }.map { $0.id })
-        if hasClaudeCodeCredentials {
+        if hasImportedClaudeCredentials {
             toRefresh.insert(.claude)
         }
-        if hasOpenAICodexCredentials {
+        if hasImportedOpenAICredentials {
             toRefresh.insert(.chatgpt)
         }
 
@@ -151,13 +199,18 @@ final class UsageStore: ObservableObject {
             guard let slug = provider.downdetectorSlug else { continue }
             if let report = await DowndetectorService.fetch(slug: slug) {
                 downdetectorData[provider] = report
+            } else if let existing = downdetectorData[provider],
+                      !existing.isFresh(staleAfter: colorSettings.downdetectorFreshnessInterval) {
+                downdetectorData.removeValue(forKey: provider)
             }
         }
     }
 
     private func refresh(provider: ProviderID) async {
+        guard !isExternalResyncInProgress(for: provider) else { return }
         update(provider) { $0.state = .loading; $0.statusMessage = "Refreshing..." }
 
+        let clients = ProviderFactory.makeAll()
         guard let client = clients[provider] else {
             update(provider) { $0.state = .error; $0.statusMessage = "No client" }
             return
@@ -184,8 +237,10 @@ final class UsageStore: ObservableObject {
             update(provider) {
                 $0.state = .unauthenticated
                 $0.statusMessage = msg
+                $0.planName = "Not connected"
                 $0.limits = []
                 $0.authenticated = false
+                $0.email = nil
             }
         case .invalidPayload(let msg), .unavailable(let msg):
             update(provider) {
@@ -201,7 +256,7 @@ final class UsageStore: ObservableObject {
     }
 
     private func persistLocallySignedOutProviders() {
-        UserDefaults.standard.set(locallySignedOutProviders.map(\.rawValue), forKey: locallySignedOutKey)
+        defaults.set(locallySignedOutProviders.map(\.rawValue), forKey: locallySignedOutKey)
     }
 
     private func update(_ provider: ProviderID, transform: (inout ProviderUsageCard) -> Void) {
@@ -209,6 +264,135 @@ final class UsageStore: ObservableObject {
         var c = cards[i]
         transform(&c)
         cards[i] = c
+    }
+
+    private func startSignInTask(
+        for provider: ProviderID,
+        operation: @escaping (UUID) async -> Void
+    ) {
+        cancelSignInTask(for: provider)
+
+        let taskID = UUID()
+        signInTaskIDs[provider] = taskID
+        signInTasks[provider] = Task { [weak self] in
+            await operation(taskID)
+            if let self {
+                self.finishSignInTask(for: provider, taskID: taskID)
+            }
+        }
+    }
+
+    private func cancelSignInTask(for provider: ProviderID) {
+        signInTasks[provider]?.cancel()
+        signInTasks[provider] = nil
+        signInTaskIDs[provider] = nil
+    }
+
+    private func finishSignInTask(for provider: ProviderID, taskID: UUID) {
+        guard signInTaskIDs[provider] == taskID else { return }
+        signInTasks[provider] = nil
+        signInTaskIDs[provider] = nil
+    }
+
+    private func isActiveSignInTask(_ taskID: UUID, for provider: ProviderID) -> Bool {
+        !Task.isCancelled && signInTaskIDs[provider] == taskID
+    }
+
+    private func isExternalResyncInProgress(for provider: ProviderID) -> Bool {
+        signInTaskIDs[provider] != nil
+    }
+
+    private func resyncFromClaudeCode(taskID: UUID) async {
+        guard isActiveSignInTask(taskID, for: .claude) else { return }
+
+        if let imported = try? claudeCredentialImport(),
+           KeychainHelper.isTokenValid(imported) {
+            await refreshAfterExternalImport(.claude, taskID: taskID)
+            return
+        }
+
+        guard isActiveSignInTask(taskID, for: .claude) else { return }
+
+        update(.claude) {
+            $0.state = .loading
+            $0.statusMessage = "Sign into Claude Code, then wait..."
+            $0.planName = "Not connected"
+            $0.limits = []
+            $0.authenticated = false
+            $0.email = nil
+        }
+
+        guard isActiveSignInTask(taskID, for: .claude) else { return }
+
+        if await waitForClaudeExternalCredentials(externalCredentialWaitTimeout, externalCredentialPollInterval) != nil,
+           isActiveSignInTask(taskID, for: .claude),
+           let imported = try? claudeCredentialImport(),
+           KeychainHelper.isTokenValid(imported) {
+            await refreshAfterExternalImport(.claude, taskID: taskID)
+            return
+        }
+
+        guard isActiveSignInTask(taskID, for: .claude) else { return }
+
+        update(.claude) {
+            $0.state = .unauthenticated
+            $0.statusMessage = "Claude Code login not detected"
+            $0.planName = "Not connected"
+            $0.limits = []
+            $0.authenticated = false
+            $0.email = nil
+        }
+    }
+
+    private func resyncFromCodex(taskID: UUID) async {
+        guard isActiveSignInTask(taskID, for: .chatgpt) else { return }
+
+        if let imported = try? openAICredentialImport(),
+           OpenAIAuthHelper.isTokenValid(imported) {
+            await refreshAfterExternalImport(.chatgpt, taskID: taskID)
+            return
+        }
+
+        guard isActiveSignInTask(taskID, for: .chatgpt) else { return }
+
+        update(.chatgpt) {
+            $0.state = .loading
+            $0.statusMessage = "Sign into Codex, then wait..."
+            $0.planName = "Not connected"
+            $0.limits = []
+            $0.authenticated = false
+            $0.email = nil
+        }
+
+        guard isActiveSignInTask(taskID, for: .chatgpt) else { return }
+
+        if await waitForOpenAIExternalCredentials(externalCredentialWaitTimeout, externalCredentialPollInterval) != nil,
+           isActiveSignInTask(taskID, for: .chatgpt),
+           let imported = try? openAICredentialImport(),
+           OpenAIAuthHelper.isTokenValid(imported) {
+            await refreshAfterExternalImport(.chatgpt, taskID: taskID)
+            return
+        }
+
+        guard isActiveSignInTask(taskID, for: .chatgpt) else { return }
+
+        update(.chatgpt) {
+            $0.state = .unauthenticated
+            $0.statusMessage = "Codex login not detected"
+            $0.planName = "Not connected"
+            $0.limits = []
+            $0.authenticated = false
+            $0.email = nil
+        }
+    }
+
+    private func refreshAfterExternalImport(_ provider: ProviderID, taskID: UUID) async {
+        guard isActiveSignInTask(taskID, for: provider) else { return }
+        if let refreshSingleAction {
+            await refreshSingleAction(provider)
+        } else {
+            await refreshSingle(provider)
+        }
     }
 
 }

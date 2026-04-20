@@ -1,5 +1,24 @@
 import Foundation
 
+private func externalLoginPrompt(for provider: ProviderID) -> String {
+    switch provider {
+    case .claude:
+        return "Sign into Claude Code"
+    case .chatgpt:
+        return "Sign into Codex"
+    }
+}
+
+private func authRequiredError(for provider: ProviderID, statusCode: Int) -> ProviderError? {
+    guard statusCode == 401 || statusCode == 403 else { return nil }
+    return .authRequired(externalLoginPrompt(for: provider))
+}
+
+private func authRequiredRefreshError(for provider: ProviderID, statusCode: Int) -> ProviderError? {
+    guard statusCode == 400 || statusCode == 401 || statusCode == 403 else { return nil }
+    return .authRequired(externalLoginPrompt(for: provider))
+}
+
 @MainActor
 protocol ProviderClient {
     var id: ProviderID { get }
@@ -24,7 +43,7 @@ struct ScriptBackedProviderClient: ProviderClient {
         }
 
         if r.authenticated == false {
-            throw ProviderError.authRequired(r.statusMessage ?? "Sign in to \(id.title)")
+            throw ProviderError.authRequired(externalLoginPrompt(for: id))
         }
 
         var limits: [UsageLimit] = []
@@ -71,11 +90,11 @@ struct ClaudeAPIClient: ProviderClient {
     let id: ProviderID = .claude
 
     func refresh(using automation: WebAutomationService) async throws -> ProviderUsageCard {
-        guard let creds = KeychainHelper.readClaudeCodeCredentials() else {
-            throw ProviderError.authRequired("Install Claude Code and run `claude` to authenticate")
+        guard let creds = KeychainHelper.readImportedClaudeCredentials() else {
+            throw ProviderError.authRequired(externalLoginPrompt(for: .claude))
         }
         guard KeychainHelper.isTokenValid(creds) else {
-            throw ProviderError.authRequired("Claude Code token expired -- run `claude` to refresh")
+            throw ProviderError.authRequired(externalLoginPrompt(for: .claude))
         }
 
         let planName = KeychainHelper.planName(from: creds)
@@ -109,6 +128,9 @@ struct ClaudeAPIClient: ProviderClient {
 
         guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if let error = authRequiredError(for: .claude, statusCode: status) {
+                throw error
+            }
             throw ProviderError.invalidPayload("API returned \(status)")
         }
 
@@ -168,10 +190,19 @@ struct OpenAICodexClient: ProviderClient {
     let id: ProviderID = .chatgpt
 
     func refresh(using automation: WebAutomationService) async throws -> ProviderUsageCard {
-        guard OpenAIAuthHelper.readCodexCredentials() != nil else {
-            throw ProviderError.authRequired("Install Codex and sign in with ChatGPT")
+        guard OpenAIAuthHelper.readImportedCodexCredentials() != nil else {
+            throw ProviderError.authRequired(externalLoginPrompt(for: .chatgpt))
         }
-        let creds = try await OpenAIAuthHelper.refreshCodexCredentialsIfNeeded()
+        let creds: OpenAIAuthHelper.Credentials
+        do {
+            creds = try await OpenAIAuthHelper.refreshCodexCredentialsIfNeeded()
+        } catch let error as OpenAIAuthHelper.OpenAIAuthError {
+            if case .refreshFailed(let status) = error,
+               let authError = authRequiredRefreshError(for: .chatgpt, statusCode: status) {
+                throw authError
+            }
+            throw error
+        }
 
         let url = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
         var request = URLRequest(url: url)
@@ -183,6 +214,9 @@ struct OpenAICodexClient: ProviderClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if let error = authRequiredError(for: .chatgpt, statusCode: status) {
+                throw error
+            }
             throw ProviderError.invalidPayload("OpenAI usage API returned \(status)")
         }
 
@@ -316,7 +350,7 @@ private func parseISO8601Date(_ value: String) -> Date? {
 enum ProviderFactory {
     @MainActor static func makeAll() -> [ProviderID: any ProviderClient] {
         let chatGPTClient: any ProviderClient
-        if OpenAIAuthHelper.readCodexCredentials() != nil {
+        if OpenAIAuthHelper.readImportedCodexCredentials() != nil {
             chatGPTClient = OpenAICodexClient()
         } else {
             chatGPTClient = ScriptBackedProviderClient(id: .chatgpt, script: ProviderScripts.chatGPT, navigateTo: ProviderID.chatgpt.usageURL, waitForDOM: false)
@@ -324,7 +358,7 @@ enum ProviderFactory {
 
         // For Claude: use the API client if Claude Code credentials exist, otherwise fall back to browser scraping
         let claudeClient: any ProviderClient
-        if KeychainHelper.readClaudeCodeCredentials() != nil {
+        if KeychainHelper.readImportedClaudeCredentials() != nil {
             claudeClient = ClaudeAPIClient()
         } else {
             claudeClient = ScriptBackedProviderClient(

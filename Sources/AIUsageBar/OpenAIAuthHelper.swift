@@ -1,6 +1,8 @@
 import Foundation
 
 enum OpenAIAuthHelper {
+    private static let appStore = AppCredentialStore()
+
     /// Resolves the OAuth client ID from the Codex auth.json or the JWT audience claim.
     private static func resolveClientID() -> String? {
         let path = FileManager.default.homeDirectoryForCurrentUser
@@ -27,10 +29,11 @@ enum OpenAIAuthHelper {
         return nil
     }
 
-    struct Credentials {
+    struct Credentials: Codable, Equatable {
         let idToken: String
         let accessToken: String
         let refreshToken: String
+        let clientID: String
         let accountID: String
         let planType: String
         let email: String?
@@ -55,6 +58,7 @@ enum OpenAIAuthHelper {
         let auth = payload["https://api.openai.com/auth"] as? [String: Any]
         let planType = auth?["chatgpt_plan_type"] as? String ?? "chatgpt"
         let email = payload["email"] as? String
+        let clientID = resolveClientID() ?? ""
         let expiresAt: Date?
         if let exp = payload["exp"] as? Double {
             expiresAt = Date(timeIntervalSince1970: exp)
@@ -68,11 +72,27 @@ enum OpenAIAuthHelper {
             idToken: idToken,
             accessToken: accessToken,
             refreshToken: refreshToken,
+            clientID: clientID,
             accountID: accountID,
             planType: planType,
             email: email,
             expiresAt: expiresAt
         )
+    }
+
+    static func readImportedCodexCredentials() -> Credentials? {
+        appStore.readOpenAICredentials()
+    }
+
+    @discardableResult
+    static func importCodexCredentials() throws -> Credentials? {
+        guard let credentials = readCodexCredentials() else { return nil }
+        try appStore.writeOpenAICredentials(credentials)
+        return credentials
+    }
+
+    static func clearImportedCodexCredentials() {
+        appStore.deleteOpenAICredentials()
     }
 
     static func isTokenValid(_ credentials: Credentials) -> Bool {
@@ -81,14 +101,14 @@ enum OpenAIAuthHelper {
     }
 
     static func refreshCodexCredentialsIfNeeded() async throws -> Credentials {
-        guard let existing = readCodexCredentials() else {
+        guard let existing = readImportedCodexCredentials() else {
             throw OpenAIAuthError.credentialsUnavailable
         }
         if isTokenValid(existing) {
             return existing
         }
 
-        let refreshed = try await refreshCodexCredentials(using: existing.refreshToken)
+        let refreshed = try await refreshCodexCredentials(using: existing.refreshToken, clientID: existing.clientID)
         try persistRefreshedCredentials(refreshed)
         return refreshed
     }
@@ -123,8 +143,8 @@ enum OpenAIAuthHelper {
         return json
     }
 
-    private static func refreshCodexCredentials(using refreshToken: String) async throws -> Credentials {
-        guard let clientID = resolveClientID() else {
+    private static func refreshCodexCredentials(using refreshToken: String, clientID: String) async throws -> Credentials {
+        guard !clientID.isEmpty else {
             throw OpenAIAuthError.credentialsUnavailable
         }
         var request = URLRequest(url: URL(string: "https://auth.openai.com/oauth/token")!)
@@ -173,6 +193,7 @@ enum OpenAIAuthHelper {
             idToken: idToken,
             accessToken: accessToken,
             refreshToken: newRefreshToken,
+            clientID: clientID,
             accountID: accountID,
             planType: planType,
             email: email,
@@ -181,27 +202,7 @@ enum OpenAIAuthHelper {
     }
 
     private static func persistRefreshedCredentials(_ credentials: Credentials) throws {
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/auth.json")
-        guard let data = try? Data(contentsOf: path),
-              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var tokens = json["tokens"] as? [String: Any] else {
-            throw OpenAIAuthError.credentialsUnavailable
-        }
-
-        // Preserve existing auth structure, just rotate tokens.
-        tokens["access_token"] = credentials.accessToken
-        tokens["refresh_token"] = credentials.refreshToken
-        tokens["id_token"] = credentials.idToken
-
-        if !credentials.accountID.isEmpty {
-            tokens["account_id"] = credentials.accountID
-        }
-
-        json["tokens"] = tokens
-        json["last_refresh"] = ISO8601DateFormatter().string(from: Date())
-        let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-        try out.write(to: path, options: .atomic)
+        try appStore.writeOpenAICredentials(credentials)
     }
 
     enum OpenAIAuthError: LocalizedError {

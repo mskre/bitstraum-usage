@@ -13,6 +13,7 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var previewView: StatusBarPreviewView?
     private let popover = NSPopover()
     private var cancellables = Set<AnyCancellable>()
+    private var hasRequestedNotificationAuthorization = false
 
     static func main() {
         let application = NSApplication.shared
@@ -165,6 +166,11 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         colorSettings.$ddBaselinePercent
             .sink { [weak self] val in self?.previewView?.ddBaselinePercent = val }
             .store(in: &cancellables)
+        colorSettings.$refreshIntervalMinutes
+            .sink { [weak self] _ in
+                self?.previewView?.ddFreshnessInterval = self?.colorSettings.downdetectorFreshnessInterval ?? 600
+            }
+            .store(in: &cancellables)
         colorSettings.$showDowndetector
             .sink { [weak self] val in self?.previewView?.showDowndetector = val }
             .store(in: &cancellables)
@@ -299,7 +305,13 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var activeAlerts: Set<String> = []
 
     private func setupNotifications() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        colorSettings.$sendNotifications
+            .dropFirst()
+            .sink { [weak self] enabled in
+                guard enabled else { return }
+                self?.requestNotificationAuthorizationIfNeeded()
+            }
+            .store(in: &cancellables)
 
         // Monitor downdetector changes
         store.$downdetectorData
@@ -346,8 +358,9 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             for provider in ProviderID.allCases {
                 let key = "dd-\(provider.rawValue)"
                 if let report = downdetector[provider] {
-                    let status = report.effectiveStatus(
-                        baselinePercent: colorSettings.ddBaselinePercent
+                    let status = report.alertStatus(
+                        baselinePercent: colorSettings.ddBaselinePercent,
+                        staleAfter: colorSettings.downdetectorFreshnessInterval
                     )
                     if status.hasProblems {
                         if !activeAlerts.contains(key) {
@@ -366,6 +379,7 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func sendNotification(title: String, body: String) {
+        requestNotificationAuthorizationIfNeeded()
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -376,5 +390,14 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+
+    private func requestNotificationAuthorizationIfNeeded() {
+        guard !hasRequestedNotificationAuthorization else { return }
+        hasRequestedNotificationAuthorization = true
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .notDetermined else { return }
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
     }
 }

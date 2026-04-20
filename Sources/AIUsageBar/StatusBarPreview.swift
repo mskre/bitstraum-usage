@@ -25,6 +25,9 @@ final class StatusBarPreviewView: NSView {
     var ddBaselinePercent: Double = 400 {
         didSet { updateIcon() }
     }
+    var ddFreshnessInterval: TimeInterval = 600 {
+        didSet { updateIcon() }
+    }
     var showDowndetector: Bool = true {
         didSet { updateIcon() }
     }
@@ -57,8 +60,9 @@ final class StatusBarPreviewView: NSView {
         }
         // Check Downdetector
         if showDowndetector, let report = downdetectorData[provider] {
-            let status = report.effectiveStatus(
-                baselinePercent: ddBaselinePercent
+            let status = report.alertStatus(
+                baselinePercent: ddBaselinePercent,
+                staleAfter: ddFreshnessInterval
             )
             switch status {
             case .danger: return .red

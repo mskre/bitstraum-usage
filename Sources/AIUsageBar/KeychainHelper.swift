@@ -3,8 +3,9 @@ import Security
 
 /// Reads Claude Code OAuth credentials from the macOS Keychain.
 enum KeychainHelper {
+    private static let appStore = AppCredentialStore()
 
-    struct ClaudeCredentials {
+    struct ClaudeCredentials: Codable, Equatable {
         let accessToken: String
         let refreshToken: String
         let expiresAt: Double          // ms since epoch
@@ -43,6 +44,21 @@ enum KeychainHelper {
         )
     }
 
+    static func readImportedClaudeCredentials() -> ClaudeCredentials? {
+        appStore.readClaudeCredentials()
+    }
+
+    @discardableResult
+    static func importClaudeCodeCredentials() throws -> ClaudeCredentials? {
+        guard let credentials = readClaudeCodeCredentials() else { return nil }
+        try appStore.writeClaudeCredentials(credentials)
+        return credentials
+    }
+
+    static func clearImportedClaudeCredentials() {
+        appStore.deleteClaudeCredentials()
+    }
+
     /// Whether the stored token is still valid (not expired).
     static func isTokenValid(_ creds: ClaudeCredentials) -> Bool {
         let expiryDate = Date(timeIntervalSince1970: creds.expiresAt / 1000)
@@ -60,5 +76,47 @@ enum KeychainHelper {
             return "\(base) (\(creds.rateLimitTier[range]))"
         }
         return base
+    }
+
+    static func waitForExternalCredentials<T>(
+        timeout: TimeInterval,
+        interval: TimeInterval,
+        read: @escaping () async -> T?
+    ) async -> T? {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .nanoseconds(Int64(max(timeout, 0) * 1_000_000_000)))
+        let intervalNanoseconds = UInt64(max(interval, 0) * 1_000_000_000)
+
+        while clock.now < deadline {
+            if Task.isCancelled {
+                return await read()
+            }
+
+            if let credentials = await read() {
+                return credentials
+            }
+
+            if intervalNanoseconds > 0 {
+                let remaining = clock.now.duration(to: deadline)
+                let remainingNanoseconds = max(0, remaining.components.seconds * 1_000_000_000 + Int64(remaining.components.attoseconds / 1_000_000_000))
+                let sleepNanoseconds = min(intervalNanoseconds, UInt64(remainingNanoseconds))
+
+                guard sleepNanoseconds > 0 else {
+                    continue
+                }
+
+                do {
+                    try await Task.sleep(nanoseconds: sleepNanoseconds)
+                } catch is CancellationError {
+                    return await read()
+                } catch {
+                    return await read()
+                }
+            } else {
+                await Task.yield()
+            }
+        }
+
+        return await read()
     }
 }

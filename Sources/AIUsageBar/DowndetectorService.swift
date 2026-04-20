@@ -35,6 +35,19 @@ struct DowndetectorReport {
     var indicators: [DowndetectorIndicator]
     var fetchedAt: Date
 
+    func isFresh(staleAfter: TimeInterval, now: Date = Date()) -> Bool {
+        now.timeIntervalSince(fetchedAt) <= staleAfter
+    }
+
+    func alertStatus(
+        baselinePercent: Double = 400,
+        staleAfter: TimeInterval,
+        now: Date = Date()
+    ) -> DowndetectorStatusLevel {
+        guard isFresh(staleAfter: staleAfter, now: now) else { return .unknown }
+        return effectiveStatus(baselinePercent: baselinePercent)
+    }
+
     /// Adjusts status based on whether the latest data point exceeds the baseline multiplier.
     func effectiveStatus(baselinePercent: Double = 400) -> DowndetectorStatusLevel {
         guard status.hasProblems else { return status }
@@ -54,8 +67,6 @@ struct DowndetectorReport {
 enum DowndetectorService {
 
     private static var webView: WKWebView?
-    private static var challengeWindow: NSWindow?
-    private static var challengeSolved = false
 
     private static func getWebView() -> WKWebView {
         if let wv = webView { return wv }
@@ -67,41 +78,6 @@ enum DowndetectorService {
         let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 600, height: 500), configuration: config)
         webView = wv
         return wv
-    }
-
-    private static func showChallengeWindow() {
-        guard challengeWindow == nil else { return }
-        guard let wv = webView else { return }
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Verifying Downdetector..."
-        window.isReleasedWhenClosed = false
-        wv.frame = window.contentView!.bounds
-        wv.autoresizingMask = [.width, .height]
-        window.contentView!.addSubview(wv)
-        window.center()
-
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        challengeWindow = window
-    }
-
-    private static func hideChallengeWindow() {
-        guard let window = challengeWindow else { return }
-        if let wv = webView {
-            wv.removeFromSuperview()
-        }
-        window.close()
-        challengeWindow = nil
-        if NSApp.windows.filter({ $0.isVisible && $0 !== window }).isEmpty {
-            NSApp.setActivationPolicy(.accessory)
-        }
     }
 
     static func fetch(slug: String) async -> DowndetectorReport? {
@@ -119,7 +95,6 @@ enum DowndetectorService {
         }
 
         var html: String?
-        var showedWindow = false
 
         for attempt in 0..<30 {
             let pageHTML = try? await wv.evaluateJavaScript(
@@ -128,32 +103,35 @@ enum DowndetectorService {
 
             if let h = pageHTML, h.contains("reportsValue") {
                 html = h
-                if showedWindow {
-                    challengeSolved = true
-                    hideChallengeWindow()
-                }
                 break
             }
 
-            if attempt == 2, !challengeSolved {
-                let isChallenge = pageHTML?.contains("Just a moment") == true
-                if isChallenge {
-                    showChallengeWindow()
-                    showedWindow = true
-                }
+            if let pageHTML, isChallengePage(pageHTML) {
+                break
             }
 
+            if attempt >= 2 {
+                // Give the page a couple of seconds to settle, then stop waiting.
+                // Background refresh should fail silently rather than linger.
+                break
+            }
             try? await Task.sleep(for: .seconds(1))
         }
 
         wv.navigationDelegate = nil
 
-        if showedWindow && html == nil {
-            hideChallengeWindow()
-        }
-
         guard let html else { return nil }
         return parse(html: html)
+    }
+
+    private static func isChallengePage(_ html: String) -> Bool {
+        let markers = [
+            "Just a moment",
+            "Verify you are human",
+            "challenge-platform",
+            "cf-challenge",
+        ]
+        return markers.contains { html.contains($0) }
     }
 
     private static func parse(html: String) -> DowndetectorReport? {
