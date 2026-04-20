@@ -6,7 +6,10 @@ final class UsageStore: ObservableObject {
     @Published var cards: [ProviderUsageCard]
     @Published var isRefreshing = false
     @Published var lastRefresh: Date?
+    @Published var lastDowndetectorRefresh: Date?
     @Published var downdetectorData: [ProviderID: DowndetectorReport] = [:]
+    @Published var downdetectorTabState: DowndetectorTabState = .unavailable
+    @Published var isRefreshingDowndetector = false
 
     private let automation = WebAutomationService()
     private let colorSettings = ColorSettings.shared
@@ -24,7 +27,11 @@ final class UsageStore: ObservableObject {
     }
     var waitForClaudeExternalCredentials: (TimeInterval, TimeInterval) async -> KeychainHelper.ClaudeCredentials? = { timeout, interval in
         await KeychainHelper.waitForExternalCredentials(timeout: timeout, interval: interval) {
-            KeychainHelper.readClaudeCodeCredentials()
+            guard let credentials = KeychainHelper.readClaudeCodeCredentials(),
+                  KeychainHelper.isTokenValid(credentials) else {
+                return nil
+            }
+            return credentials
         }
     }
     var openAICredentialImport: () throws -> OpenAIAuthHelper.Credentials? = {
@@ -32,7 +39,11 @@ final class UsageStore: ObservableObject {
     }
     var waitForOpenAIExternalCredentials: (TimeInterval, TimeInterval) async -> OpenAIAuthHelper.Credentials? = { timeout, interval in
         await KeychainHelper.waitForExternalCredentials(timeout: timeout, interval: interval) {
-            OpenAIAuthHelper.readCodexCredentials()
+            guard let credentials = OpenAIAuthHelper.readCodexCredentials(),
+                  OpenAIAuthHelper.isUsableForImport(credentials) else {
+                return nil
+            }
+            return credentials
         }
     }
     var embeddedBrowserSignIn: ((ProviderID, @escaping () -> Void) -> Void)?
@@ -194,15 +205,58 @@ final class UsageStore: ObservableObject {
 
     // MARK: - Downdetector
 
+    func retryDowndetectorNow() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+        await refreshDowndetector()
+    }
+
+    func openDowndetectorUnlockWindow() {
+        guard case .blocked(let slug) = downdetectorTabState else { return }
+        DowndetectorService.onUnlockWindowClosed = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.retryDowndetectorNow()
+            }
+        }
+        DowndetectorService.presentUnlockWindow(for: slug)
+    }
+
     private func refreshDowndetector() async {
+        guard !isRefreshingDowndetector else { return }
+        isRefreshingDowndetector = true
+        defer { isRefreshingDowndetector = false }
+
+        var blockedSlug: String?
+        var sawReport = false
+
         for provider in ProviderID.allCases {
             guard let slug = provider.downdetectorSlug else { continue }
-            if let report = await DowndetectorService.fetch(slug: slug) {
+            switch await DowndetectorService.fetchResult(slug: slug) {
+            case .report(let report):
+                sawReport = true
                 downdetectorData[provider] = report
-            } else if let existing = downdetectorData[provider],
-                      !existing.isFresh(staleAfter: colorSettings.downdetectorFreshnessInterval) {
-                downdetectorData.removeValue(forKey: provider)
+            case .blocked:
+                blockedSlug = blockedSlug ?? slug
+                if let existing = downdetectorData[provider],
+                   !existing.isFresh(staleAfter: colorSettings.downdetectorFreshnessInterval) {
+                    downdetectorData.removeValue(forKey: provider)
+                }
+            case .unavailable:
+                if let existing = downdetectorData[provider],
+                   !existing.isFresh(staleAfter: colorSettings.downdetectorFreshnessInterval) {
+                    downdetectorData.removeValue(forKey: provider)
+                }
             }
+        }
+
+        downdetectorTabState = DowndetectorService.tabState(
+            hasReportData: !downdetectorData.isEmpty,
+            blockedSlug: blockedSlug
+        )
+        if sawReport {
+            lastDowndetectorRefresh = Date()
         }
     }
 
@@ -348,7 +402,7 @@ final class UsageStore: ObservableObject {
         guard isActiveSignInTask(taskID, for: .chatgpt) else { return }
 
         if let imported = try? openAICredentialImport(),
-           OpenAIAuthHelper.isTokenValid(imported) {
+           OpenAIAuthHelper.isUsableForImport(imported) {
             await refreshAfterExternalImport(.chatgpt, taskID: taskID)
             return
         }
@@ -369,7 +423,7 @@ final class UsageStore: ObservableObject {
         if await waitForOpenAIExternalCredentials(externalCredentialWaitTimeout, externalCredentialPollInterval) != nil,
            isActiveSignInTask(taskID, for: .chatgpt),
            let imported = try? openAICredentialImport(),
-           OpenAIAuthHelper.isTokenValid(imported) {
+           OpenAIAuthHelper.isUsableForImport(imported) {
             await refreshAfterExternalImport(.chatgpt, taskID: taskID)
             return
         }

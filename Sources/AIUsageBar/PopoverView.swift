@@ -8,6 +8,36 @@ private struct PopoverContentHeightKey: PreferenceKey {
     }
 }
 
+struct DetachedPanelChromeMetrics {
+    let cornerRadius: CGFloat
+    let baseOpacity: Double
+    let showsTopTab: Bool
+
+    static let smokedGlass = DetachedPanelChromeMetrics(
+        cornerRadius: 18,
+        baseOpacity: 0.58,
+        showsTopTab: false
+    )
+}
+
+struct LiquidGlassBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .hudWindow
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = true
+        view.wantsLayer = true
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = .hudWindow
+        nsView.blendingMode = .behindWindow
+        nsView.state = .active
+    }
+}
+
 struct PopoverView: View {
     @EnvironmentObject private var store: UsageStore
     @EnvironmentObject private var colorSettings: ColorSettings
@@ -31,6 +61,7 @@ struct PopoverView: View {
     }
     private var isSubView: Bool { showSettings || showDowndetector }
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private let chrome = DetachedPanelChromeMetrics.smokedGlass
 
     private var currentViewName: String {
         if showSettings { return "settings" }
@@ -101,35 +132,52 @@ struct PopoverView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
+        ZStack {
+            VStack(spacing: 0) {
+                header
+                    .padding(.horizontal, 14)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
 
-            Divider().opacity(0.3)
+                Divider().overlay(Color.white.opacity(0.08))
 
-            ScrollView(.vertical, showsIndicators: true) {
-                contentBody
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear
-                                .preference(key: PopoverContentHeightKey.self, value: proxy.size.height)
-                        }
-                    )
-                    
+                ScrollView(.vertical, showsIndicators: true) {
+                    contentBody
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .preference(key: PopoverContentHeightKey.self, value: proxy.size.height)
+                            }
+                        )
+                }
+                .frame(maxHeight: maxContentHeight)
+
+                Divider().overlay(Color.white.opacity(0.08))
+
+                footer
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
             }
-            .frame(maxHeight: maxContentHeight)
-
-            Divider().opacity(0.3)
-
-            footer
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+            .frame(width: popoverWidth)
+            .background(
+                LiquidGlassBackground()
+                    .overlay(Color.black.opacity(0.18))
+                    .overlay(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.10), .clear],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+            )
+            .clipShape(RoundedRectangle(cornerRadius: chrome.cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: chrome.cornerRadius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+            )
         }
-        .padding(.vertical, 4)
         .frame(width: popoverWidth)
-        .background(Color(nsColor: colorSettings.appBackgroundColor))
+        .background(Color.clear)
         .onAppear {
             popoverController.preferredSize = CGSize(width: popoverWidth, height: preferredPopoverHeight)
             if colorSettings.rememberLastView {
@@ -195,20 +243,19 @@ struct PopoverView: View {
     private var header: some View {
         HStack {
             if isSubView {
-                Button {
-                    goHome()
-                } label: {
-                    HStack(spacing: 4) {
-                        Text("Bitstraum Usage")
-                            .font(.system(size: 13, weight: .semibold))
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.tertiary)
-                        Text(showSettings ? "Settings" : "Downdetector")
-                            .font(.system(size: 13, weight: .semibold))
-                    }
+                HStack(spacing: 4) {
+                    Text("Bitstraum Usage")
+                        .font(.system(size: 13, weight: .semibold))
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                    Text(showSettings ? "Settings" : "Downdetector")
+                        .font(.system(size: 13, weight: .semibold))
                 }
-                .buttonStyle(.borderless)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    goHome()
+                }
             } else {
                 Text("Bitstraum Usage")
                     .font(.system(size: 13, weight: .semibold))
@@ -239,7 +286,7 @@ struct PopoverView: View {
             Button {
                 Task { await store.refreshAll() }
             } label: {
-                if store.isRefreshing {
+                if store.isRefreshing || store.isRefreshingDowndetector {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .controlSize(.small)
@@ -249,6 +296,7 @@ struct PopoverView: View {
                         .foregroundStyle(.white)
                 }
             }
+            .disabled(store.isRefreshing || store.isRefreshingDowndetector)
             .buttonStyle(.borderless)
         }
     }
@@ -266,7 +314,8 @@ struct PopoverView: View {
     }
 
     private var lastUpdatedText: String {
-        guard let d = store.lastRefresh else { return "Not refreshed yet" }
+        let timestamp = showDowndetector ? store.lastDowndetectorRefresh : store.lastRefresh
+        guard let d = timestamp else { return "Not refreshed yet" }
         let seconds = Int(now.timeIntervalSince(d))
         if seconds < 5 { return "Last updated just now" }
         if seconds < 60 { return "Last updated \(seconds) seconds ago" }
@@ -312,8 +361,8 @@ struct ProviderCardView: View {
                 }
             }
 
-            if colorSettings.showSensitiveInfo, let email = card.email {
-                Text(displayEmail(email))
+            if let emailText = displayEmailText {
+                Text(emailText)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -371,9 +420,17 @@ struct ProviderCardView: View {
         }
     }
 
-    private func displayEmail(_ email: String) -> String {
-        guard colorSettings.maskSensitiveData else { return email }
-        return maskEmail(email, percentage: colorSettings.maskPercentage, domainOnly: colorSettings.maskDomainOnly)
+    private var displayEmailText: String? {
+        guard let email = card.email else { return nil }
+
+        switch colorSettings.privacyMode {
+        case .hidden:
+            return nil
+        case .visible:
+            return email
+        case .masked:
+            return maskEmail(email, percentage: colorSettings.maskPercentage, domainOnly: colorSettings.maskDomainOnly)
+        }
     }
 
     private var actionTitle: String {
@@ -434,11 +491,13 @@ enum ExpandedPicker: Equatable {
 
 struct ColorSettingsView: View {
     @EnvironmentObject private var colorSettings: ColorSettings
-    @EnvironmentObject private var store: UsageStore
     @State private var expandedPicker: ExpandedPicker?
 
-    private var sampleEmail: String {
-        store.cards.compactMap(\.email).first ?? "name@example.com"
+    private var privacyModeBinding: Binding<ColorSettings.PrivacyMode> {
+        Binding(
+            get: { colorSettings.privacyMode },
+            set: { colorSettings.privacyMode = $0 }
+        )
     }
 
     private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -465,66 +524,11 @@ struct ColorSettingsView: View {
         .padding(.vertical, 1)
     }
 
-    private var globalBaselineLabel: String {
-        let mult = colorSettings.ddBaselinePercent / 100.0
-        if mult == mult.rounded() { return "\(Int(mult))x" }
-        return String(format: "%.1fx", mult)
-    }
-
-    private var globalThresholdReports: String {
-        let mult = colorSettings.ddBaselinePercent / 100.0
-        var parts: [String] = []
-        for provider in ProviderID.allCases {
-            if let b = store.downdetectorData[provider]?.dataPoints.last?.baseline, b > 0 {
-                let reports = Int((Double(b) * mult).rounded())
-                parts.append("\(provider.title): ≈ \(reports) reports")
-            }
-        }
-        return parts.joined(separator: ", ")
-    }
-
-    private var previewEmailText: String {
-        guard colorSettings.showSensitiveInfo else { return "Hidden" }
-        return colorSettings.maskSensitiveData ? maskEmail(sampleEmail, percentage: colorSettings.maskPercentage, domainOnly: colorSettings.maskDomainOnly) : sampleEmail
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Bar Colors")
-                .font(.system(size: 12, weight: .semibold))
-
-            BackgroundColorRow(expandedPicker: $expandedPicker)
-
-            ForEach(ProviderID.allCases) { provider in
-                HexColorRow(provider: provider, expandedPicker: $expandedPicker)
-            }
-
-            // MARK: Providers
-            settingsSection("Providers") {
-                let enabledCount = colorSettings.enabledProviders.filter(\.value).count
-                ForEach(ProviderID.allCases) { provider in
-                    let isLast = enabledCount <= 1 && colorSettings.isProviderEnabled(provider)
-                    settingsToggle(provider.title, isOn: Binding(
-                        get: { colorSettings.isProviderEnabled(provider) },
-                        set: { colorSettings.enabledProviders[provider] = $0 }
-                    ))
-                    .disabled(isLast)
-                }
-                if enabledCount <= 1 {
-                    Text("At least one provider must be enabled")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            // MARK: General
-            settingsSection("General") {
-                settingsToggle("Hide on mouse exit", isOn: $colorSettings.dismissOnMouseExit)
-                settingsToggle("Remember last open view", isOn: $colorSettings.rememberLastView)
-                settingsToggle("Show reset labels", isOn: $colorSettings.showResetLabels)
-                settingsToggle("Provider labels in menu bar", isOn: $colorSettings.showProviderLabels)
-                settingsToggle("24-hour time format", isOn: $colorSettings.use24HourTime)
-
+            // Settings should only show: refresh interval, notifications, sensitive info, Downdetector, quit, reset.
+            // Color pickers and low-level tuning controls should be removed from the primary settings UI.
+            settingsSection("Essentials") {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("Refresh interval")
@@ -537,106 +541,48 @@ struct ColorSettingsView: View {
                     Slider(value: $colorSettings.refreshIntervalMinutes, in: 1...30, step: 1)
                         .controlSize(.mini)
                 }
-            }
-
-            // MARK: Notifications
-            settingsSection("Alerts") {
-                settingsToggle("Alert dot on menu bar", isOn: $colorSettings.showAlertDot)
                 settingsToggle("Send notifications", isOn: $colorSettings.sendNotifications)
-            }
-
-            // MARK: Privacy
-            settingsSection("Privacy") {
-                settingsToggle("Show emails / sensitive info", isOn: $colorSettings.showSensitiveInfo)
-
-                if colorSettings.showSensitiveInfo {
-                    settingsToggle("Mask emails", isOn: $colorSettings.maskSensitiveData)
-
-                    if colorSettings.maskSensitiveData {
-                        settingsToggle("Only mask domain after @", isOn: $colorSettings.maskDomainOnly)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Mask amount")
-                                    .font(.system(size: 12))
-                                Spacer()
-                                Text("\(Int((colorSettings.maskPercentage * 100).rounded()))%")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Slider(value: $colorSettings.maskPercentage, in: 0...1, step: 0.05)
-                                .controlSize(.mini)
-                            HStack(spacing: 6) {
-                                Text("Preview")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                Text(previewEmailText)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // MARK: Downdetector
-            settingsSection("Downdetector") {
-                settingsToggle("Show Downdetector status", isOn: $colorSettings.showDowndetector)
-                settingsToggle("Always show on main view", isOn: $colorSettings.pinDowndetector)
-                    .disabled(!colorSettings.showDowndetector)
-
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Chart range")
-                            .font(.system(size: 11))
-                        Spacer()
-                        Text(colorSettings.ddChartHours == 24 ? "24h" : "\(Int(colorSettings.ddChartHours))h")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 36, alignment: .trailing)
+                    Text("Account info")
+                        .font(.system(size: 12))
+                    Picker("Account info", selection: privacyModeBinding) {
+                        Text("Hidden").tag(ColorSettings.PrivacyMode.hidden)
+                        Text("Visible").tag(ColorSettings.PrivacyMode.visible)
+                        Text("Masked").tag(ColorSettings.PrivacyMode.masked)
                     }
-                    Slider(value: $colorSettings.ddChartHours, in: 1...24, step: 1)
-                        .controlSize(.mini)
-
-                    HStack {
-                        Text("Baseline")
-                            .font(.system(size: 11))
-                        Spacer()
-                        Text(globalBaselineLabel)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 46, alignment: .trailing)
-                    }
-                    Slider(value: $colorSettings.ddBaselinePercent, in: 1000...3000, step: 100)
-                        .controlSize(.mini)
-                    if !globalThresholdReports.isEmpty {
-                        Text(globalThresholdReports)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
                 }
-                .disabled(!colorSettings.showDowndetector)
+                settingsToggle("Show Downdetector", isOn: $colorSettings.showDowndetector)
             }
 
-            HStack {
-                Button("Quit Bitstraum Usage") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 10))
-                .foregroundStyle(.red.opacity(0.7))
-
-                Spacer()
-
-                Button("Reset to Defaults") {
-                    colorSettings.resetToDefaults()
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+            settingsSection("Provider Colors") {
+                HexColorRow(provider: .chatgpt, expandedPicker: $expandedPicker)
+                HexColorRow(provider: .claude, expandedPicker: $expandedPicker)
             }
+
+            VStack(spacing: 10) {
+                Divider().opacity(0.25)
+
+                HStack {
+                    Button("Quit Bitstraum Usage") {
+                        NSApplication.shared.terminate(nil)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red.opacity(0.7))
+
+                    Spacer()
+
+                    Button("Reset to Defaults") {
+                        colorSettings.resetToDefaults()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 10)
 
         }
     }
@@ -1175,6 +1121,46 @@ struct DowndetectorTabView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 0) {
+                if case .blocked = store.downdetectorTabState {
+                    VStack(spacing: 10) {
+                        Image(systemName: "lock.slash")
+                            .font(.system(size: 24))
+                            .foregroundStyle(.secondary)
+                        Text("Downdetector blocked the automated refresh.")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Open the site to clear the challenge, then retry the refresh.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("Open Downdetector") {
+                            store.openDowndetectorUnlockWindow()
+                        }
+                        .buttonStyle(.borderless)
+                        Button {
+                            Task { await store.retryDowndetectorNow() }
+                        } label: {
+                            if store.isRefreshingDowndetector || store.isRefreshing {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .controlSize(.small)
+                                    Text("Retrying...")
+                                }
+                            } else {
+                                Text("Retry")
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(store.isRefreshingDowndetector || store.isRefreshing)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+
+                    if !store.downdetectorData.isEmpty {
+                        Divider().opacity(0.2)
+                    }
+                }
+
                 ForEach(ProviderID.allCases) { provider in
                     if let report = store.downdetectorData[provider] {
                         DowndetectorProviderSection(
@@ -1195,20 +1181,24 @@ struct DowndetectorTabView: View {
                 }
 
                 if store.downdetectorData.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "chart.bar.xaxis")
-                            .font(.system(size: 24))
-                            .foregroundStyle(.tertiary)
-                        Text("No data yet")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                        Text("Downdetector status will appear after the next refresh.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .multilineTextAlignment(.center)
+                    if case .blocked = store.downdetectorTabState {
+                        EmptyView()
+                    } else {
+                        VStack(spacing: 8) {
+                            Image(systemName: "chart.bar.xaxis")
+                                .font(.system(size: 24))
+                                .foregroundStyle(.tertiary)
+                            Text("No data yet")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Text("Downdetector status will appear after the next refresh.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 20)
                 }
             }
         }

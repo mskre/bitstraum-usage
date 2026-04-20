@@ -4,16 +4,24 @@ import SwiftUI
 import UserNotifications
 
 @MainActor
+private final class StatusPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
 @main
-final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+final class AIUsageBarMain: NSObject, NSApplicationDelegate {
     private let store = UsageStore()
     private let colorSettings = ColorSettings.shared
     private let popoverController = PopoverController()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var previewView: StatusBarPreviewView?
-    private let popover = NSPopover()
+    private var panel: StatusPanel?
     private var cancellables = Set<AnyCancellable>()
     private var hasRequestedNotificationAuthorization = false
+    private var localEventMonitor: Any?
+    private var globalEventMonitor: Any?
 
     static func main() {
         let application = NSApplication.shared
@@ -185,15 +193,15 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .store(in: &cancellables)
         popoverController.$preferredSize
             .sink { [weak self] size in
-                guard let self, size.width > 0, size.height > 0 else { return }
-                let current = self.popover.contentSize
+                guard let self, size.width > 0, size.height > 0, let panel = self.panel else { return }
+                let current = panel.contentLayoutRect.size
                 let dw = abs(size.width - current.width)
                 let dh = abs(size.height - current.height)
                 // Only resize/reposition if the size changed meaningfully
                 // to prevent micro-shifts while dragging sliders
                 guard dw > 5 || dh > 5 else { return }
-                self.popover.contentSize = NSSize(width: size.width, height: size.height)
-                self.clampPopoverToVisibleScreen()
+                panel.setContentSize(NSSize(width: size.width, height: size.height))
+                self.positionPanelRelativeToStatusItem()
             }
             .store(in: &cancellables)
 
@@ -211,7 +219,7 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    // MARK: - Popover
+    // MARK: - Panel
 
     private func configurePanel() {
         let rootView = PopoverView()
@@ -219,33 +227,49 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .environmentObject(colorSettings)
             .environmentObject(popoverController)
         let controller = NSHostingController(rootView: rootView)
-        popover.contentViewController = controller
-        popover.behavior = .transient
-        popover.animates = true
-        popover.delegate = self
+        let panel = StatusPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 310, height: 420),
+            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.level = .statusBar
+        panel.collectionBehavior = [.moveToActiveSpace, .transient]
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = false
+        controller.view.wantsLayer = true
+        controller.view.layer?.backgroundColor = NSColor.clear.cgColor
+        panel.contentViewController = controller
+        panel.contentView?.wantsLayer = true
+        panel.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
+        panel.setContentSize(NSSize(width: 310, height: 420))
+        self.panel = panel
         popoverController.close = { [weak self] in
-            self?.popover.performClose(nil)
+            self?.closePanel()
         }
+        installEventMonitors()
     }
 
-    func popoverShouldClose(_ popover: NSPopover) -> Bool {
-        // Only intercept ESC key, not focus loss (clicking away should always close)
-        guard NSApp.currentEvent?.type == .keyDown,
-              NSApp.currentEvent?.keyCode == 53 else { return true }
-
-        // ESC navigates back through views before closing
+    private func handleEscapeKey() -> Bool {
         if popoverController.showSettings {
             popoverController.showSettings = false
-            return false
+            return true
         }
         if popoverController.showDowndetector {
             popoverController.showDowndetector = false
-            return false
+            return true
         }
+        closePanel()
         return true
     }
 
-    func popoverWillClose(_ notification: Notification) {
+    private func closePanel() {
+        guard let panel, panel.isVisible else { return }
+        panel.orderOut(nil)
         popoverController.didClose()
     }
 
@@ -253,8 +277,8 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func togglePanel(_ sender: AnyObject?) {
         guard statusItem.button != nil else { return }
 
-        if popover.isShown {
-            popover.performClose(sender)
+        if panel?.isVisible == true {
+            closePanel()
             return
         }
 
@@ -262,20 +286,34 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func showPanel() {
-        guard let button = statusItem.button else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        Task { @MainActor in
-            self.clampPopoverToVisibleScreen()
-        }
+        guard panel != nil else { return }
+        positionPanelRelativeToStatusItem()
+        panel?.makeKeyAndOrderFront(nil)
     }
 
-    private func clampPopoverToVisibleScreen() {
-        guard let window = popover.contentViewController?.view.window else { return }
-        let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+    private func positionPanelRelativeToStatusItem() {
+        guard let button = statusItem.button, let panel else { return }
+
+        var buttonFrame = button.convert(button.bounds, to: nil)
+        if let window = button.window {
+            buttonFrame = window.convertToScreen(buttonFrame)
+        }
+
+        let panelSize = panel.frame.size
+        let origin = NSPoint(
+            x: buttonFrame.midX - panelSize.width / 2,
+            y: buttonFrame.minY - panelSize.height
+        )
+        panel.setFrameOrigin(origin)
+        clampPanelToVisibleScreen()
+    }
+
+    private func clampPanelToVisibleScreen() {
+        guard let panel else { return }
+        let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
         guard !visible.isEmpty else { return }
 
-        var frame = window.frame
+        var frame = panel.frame
 
         if frame.width > visible.width {
             frame.size.width = visible.width - 20
@@ -297,7 +335,47 @@ final class AIUsageBarMain: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             frame.origin.y = visible.maxY - frame.height
         }
 
-        window.setFrame(frame, display: true)
+        panel.setFrame(frame, display: true)
+    }
+
+    private func installEventMonitors() {
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]) { [weak self] event in
+            guard let self, let panel, panel.isVisible else { return event }
+
+            if event.type == .keyDown, event.keyCode == 53 {
+                _ = self.handleEscapeKey()
+                return nil
+            }
+
+            guard event.type == .leftMouseDown || event.type == .rightMouseDown || event.type == .otherMouseDown else {
+                return event
+            }
+
+            let location = NSEvent.mouseLocation
+            if panel.frame.contains(location) || self.statusItemButtonFrameOnScreen()?.contains(location) == true {
+                return event
+            }
+
+            self.closePanel()
+            return event
+        }
+
+        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            guard let self, let panel, panel.isVisible else { return }
+            let location = NSEvent.mouseLocation
+            if panel.frame.contains(location) || self.statusItemButtonFrameOnScreen()?.contains(location) == true {
+                return
+            }
+            self.closePanel()
+        }
+    }
+
+    private func statusItemButtonFrameOnScreen() -> NSRect? {
+        guard let button = statusItem.button else { return nil }
+        var frame = button.convert(button.bounds, to: nil)
+        guard let window = button.window else { return nil }
+        frame = window.convertToScreen(frame)
+        return frame
     }
 
     // MARK: - Notifications

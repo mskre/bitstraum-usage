@@ -100,6 +100,14 @@ enum OpenAIAuthHelper {
         return expiresAt > Date().addingTimeInterval(60)
     }
 
+    static func isUsableForImport(_ credentials: Credentials) -> Bool {
+        if isTokenValid(credentials) {
+            return true
+        }
+
+        return !credentials.refreshToken.isEmpty && !credentials.clientID.isEmpty
+    }
+
     static func refreshCodexCredentialsIfNeeded() async throws -> Credentials {
         guard let existing = readImportedCodexCredentials() else {
             throw OpenAIAuthError.credentialsUnavailable

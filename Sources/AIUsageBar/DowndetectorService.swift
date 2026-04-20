@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import WebKit
 
@@ -61,29 +62,80 @@ struct DowndetectorReport {
     }
 }
 
+enum DowndetectorFetchState: Equatable {
+    case report
+    case blocked
+    case unavailable
+}
+
+enum DowndetectorTabState: Equatable {
+    case report
+    case blocked(slug: String)
+    case unavailable
+}
+
+enum DowndetectorFetchResult {
+    case report(DowndetectorReport)
+    case blocked
+    case unavailable
+}
+
 // MARK: - Service
+
+@MainActor
+final class UnlockWindowDelegate: NSObject, NSWindowDelegate {
+    static let shared = UnlockWindowDelegate()
+
+    func windowWillClose(_ notification: Notification) {
+        DowndetectorService.unlockWindowWillClose()
+    }
+}
 
 @MainActor
 enum DowndetectorService {
 
-    private static var webView: WKWebView?
+    fileprivate static var sharedWebView: WKWebView?
+    fileprivate static var unlockWindow: NSWindow?
+    fileprivate static var justClearedChallenge: Bool = false
+    static var onUnlockWindowClosed: (@MainActor () -> Void)?
 
-    private static func getWebView() -> WKWebView {
-        if let wv = webView { return wv }
+    fileprivate static func unlockWindowWillClose() {
+        NSApp.setActivationPolicy(.accessory)
+        justClearedChallenge = true
+        onUnlockWindowClosed?()
+    }
 
+    private static func makeWebView() -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
+        let customUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 700), configuration: config)
+        wv.customUserAgent = customUA
+        return wv
+    }
 
-        let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 600, height: 500), configuration: config)
-        webView = wv
+    private static func getSharedWebView() -> WKWebView {
+        if let wv = sharedWebView { return wv }
+
+        let wv = makeWebView()
+        sharedWebView = wv
         return wv
     }
 
     static func fetch(slug: String) async -> DowndetectorReport? {
-        guard let url = URL(string: "https://downdetector.com/status/\(slug)/") else { return nil }
+        switch await fetchResult(slug: slug) {
+        case .report(let report):
+            return report
+        case .blocked, .unavailable:
+            return nil
+        }
+    }
 
-        let wv = getWebView()
+    static func fetchResult(slug: String) async -> DowndetectorFetchResult {
+        guard let url = URL(string: "https://downdetector.com/status/\(slug)/") else { return .unavailable }
+
+        let wv = getSharedWebView()
 
         let loader = DDNavigationLoader()
         wv.navigationDelegate = loader
@@ -91,28 +143,38 @@ enum DowndetectorService {
             try await loader.load(url: url, in: wv)
         } catch {
             wv.navigationDelegate = nil
-            return nil
+            return .unavailable
         }
 
         var html: String?
+        var sawChallenge = false
 
-        for attempt in 0..<30 {
+        // If the user just solved a Cloudflare challenge, allow more wait time
+        // for the cleared session + JS challenge solver to settle.
+        let maxAttempts = justClearedChallenge ? 15 : 6
+        justClearedChallenge = false
+
+        for attempt in 0..<maxAttempts {
             let pageHTML = try? await wv.evaluateJavaScript(
                 "document.documentElement.outerHTML"
             ) as? String
 
-            if let h = pageHTML, h.contains("reportsValue") {
-                html = h
+            if let pageHTML {
+                switch classifyHTML(pageHTML) {
+                case .report:
+                    html = pageHTML
+                case .blocked:
+                    sawChallenge = true
+                case .unavailable:
+                    break
+                }
+            }
+
+            if html != nil {
                 break
             }
 
-            if let pageHTML, isChallengePage(pageHTML) {
-                break
-            }
-
-            if attempt >= 2 {
-                // Give the page a couple of seconds to settle, then stop waiting.
-                // Background refresh should fail silently rather than linger.
+            if attempt >= maxAttempts - 1 {
                 break
             }
             try? await Task.sleep(for: .seconds(1))
@@ -120,8 +182,76 @@ enum DowndetectorService {
 
         wv.navigationDelegate = nil
 
-        guard let html else { return nil }
-        return parse(html: html)
+        guard let html else {
+            return sawChallenge ? .blocked : .unavailable
+        }
+
+        guard let report = parse(html: html) else {
+            return sawChallenge ? .blocked : .unavailable
+        }
+
+        return .report(report)
+    }
+
+    static func classifyHTML(_ html: String) -> DowndetectorFetchState {
+        if isChallengePage(html) {
+            return .blocked
+        }
+
+        if parse(html: html) != nil {
+            return .report
+        }
+
+        return .unavailable
+    }
+
+    static func tabState(hasReportData: Bool, blockedSlug: String?) -> DowndetectorTabState {
+        if let blockedSlug {
+            return .blocked(slug: blockedSlug)
+        }
+
+        if hasReportData {
+            return .report
+        }
+
+        return .unavailable
+    }
+
+    static func canPresentUnlockFlow(for state: DowndetectorFetchState) -> Bool {
+        state == .blocked
+    }
+
+    static func presentUnlockWindow(for slug: String) {
+        guard let url = URL(string: "https://downdetector.com/") else { return }
+
+        let webView = getSharedWebView()
+        let window = unlockWindow ?? NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+
+        if unlockWindow == nil {
+            window.title = "Downdetector"
+            window.isReleasedWhenClosed = false
+            window.level = .normal
+            window.collectionBehavior = [.moveToActiveSpace, .managed]
+            window.delegate = UnlockWindowDelegate.shared
+            unlockWindow = window
+        }
+
+        webView.removeFromSuperview()
+        webView.frame = window.contentView?.bounds ?? .zero
+        webView.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
+        window.contentView?.addSubview(webView)
+        window.center()
+
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        webView.load(URLRequest(url: url))
     }
 
     private static func isChallengePage(_ html: String) -> Bool {

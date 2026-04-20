@@ -5,6 +5,20 @@ import SwiftUI
 final class ColorSettings: ObservableObject {
     static let shared = ColorSettings()
 
+    enum PrivacyMode: String, CaseIterable {
+        case hidden
+        case visible
+        case masked
+    }
+
+    private enum Defaults {
+        static let backgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1.0)
+        static let refreshIntervalMinutes = 5.0
+        static let maskPercentage = 0.6
+        static let downdetectorBaselinePercent = 2000.0
+        static let downdetectorChartHours = 6.0
+    }
+
     @Published private(set) var providerColors: [ProviderID: NSColor]
 
     @Published var dismissOnMouseExit: Bool {
@@ -36,6 +50,13 @@ final class ColorSettings: ObservableObject {
 
     @Published var showSensitiveInfo: Bool {
         didSet { defaults.set(showSensitiveInfo, forKey: showSensitiveInfoKey) }
+    }
+
+    @Published var privacyMode: PrivacyMode {
+        didSet {
+            applyPrivacyMode(privacyMode)
+            defaults.set(privacyMode.rawValue, forKey: privacyModeKey)
+        }
     }
 
     @Published var maskPercentage: Double {
@@ -103,7 +124,7 @@ final class ColorSettings: ObservableObject {
 
     @Published private(set) var appBackgroundColor: NSColor
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let storageKey = "providerColors"
     private let dismissKey = "dismissOnMouseExit"
     private let colorizeIconKey = "colorizeStatusIcon"
@@ -113,6 +134,7 @@ final class ColorSettings: ObservableObject {
     private let maskSensitiveDataKey = "maskSensitiveData"
     private let maskPercentageKey = "maskPercentage"
     private let showSensitiveInfoKey = "showSensitiveInfo"
+    private let privacyModeKey = "privacyMode"
     private let maskDomainOnlyKey = "maskDomainOnly"
     private let showDowndetectorKey = "showDowndetector"
     private let pinDowndetectorKey = "pinDowndetector"
@@ -126,7 +148,8 @@ final class ColorSettings: ObservableObject {
     private let sendNotificationsKey = "sendNotifications"
     private let backgroundColorKey = "appBackgroundColor"
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         var colors: [ProviderID: NSColor] = [:]
         if let dict = defaults.dictionary(forKey: storageKey) as? [String: String] {
             for provider in ProviderID.allCases {
@@ -142,32 +165,40 @@ final class ColorSettings: ObservableObject {
             }
         }
         self.providerColors = colors
-        self.dismissOnMouseExit = defaults.object(forKey: dismissKey) as? Bool ?? false
-        self.colorizeStatusIcon = defaults.object(forKey: colorizeIconKey) as? Bool ?? true
-        self.rememberLastView = defaults.object(forKey: rememberViewKey) as? Bool ?? true
-        self.lastOpenView = defaults.string(forKey: lastOpenViewKey) ?? "main"
-        self.refreshIntervalMinutes = defaults.object(forKey: refreshIntervalKey) as? Double ?? 5
-        self.maskSensitiveData = defaults.object(forKey: maskSensitiveDataKey) as? Bool ?? false
+        self.dismissOnMouseExit = true
+        self.colorizeStatusIcon = true
+        self.rememberLastView = false
+        self.lastOpenView = "main"
+        self.refreshIntervalMinutes = defaults.object(forKey: refreshIntervalKey) as? Double ?? Defaults.refreshIntervalMinutes
+        self.maskSensitiveData = true
         self.showSensitiveInfo = defaults.object(forKey: showSensitiveInfoKey) as? Bool ?? true
-        self.maskPercentage = defaults.object(forKey: maskPercentageKey) as? Double ?? 0.6
-        self.maskDomainOnly = defaults.object(forKey: maskDomainOnlyKey) as? Bool ?? false
-        self.showDowndetector = defaults.object(forKey: showDowndetectorKey) as? Bool ?? true
-        self.pinDowndetector = defaults.object(forKey: pinDowndetectorKey) as? Bool ?? false
-        self.ddBaselinePercent = defaults.object(forKey: ddBaselinePercentKey) as? Double ?? 2000
-        self.ddChartHours = defaults.object(forKey: ddChartHoursKey) as? Double ?? 6
-        self.showResetLabels = defaults.object(forKey: showResetLabelsKey) as? Bool ?? true
-        self.use24HourTime = defaults.object(forKey: use24HourTimeKey) as? Bool ?? true
-        self.showProviderLabels = defaults.object(forKey: showProviderLabelsKey) as? Bool ?? false
-        var ep: [ProviderID: Bool] = [:]
-        if let dict = defaults.dictionary(forKey: enabledProvidersKey) as? [String: Bool] {
-            for p in ProviderID.allCases { ep[p] = dict[p.rawValue] ?? true }
+        if let raw = defaults.string(forKey: privacyModeKey),
+           let mode = PrivacyMode(rawValue: raw) {
+            self.privacyMode = mode
+        } else if !(defaults.object(forKey: showSensitiveInfoKey) as? Bool ?? true) {
+            self.privacyMode = .hidden
+        } else if defaults.object(forKey: maskSensitiveDataKey) as? Bool ?? true {
+            self.privacyMode = .masked
         } else {
-            for p in ProviderID.allCases { ep[p] = true }
+            self.privacyMode = .visible
         }
+        self.maskPercentage = Defaults.maskPercentage
+        self.maskDomainOnly = false
+        self.showDowndetector = defaults.object(forKey: showDowndetectorKey) as? Bool ?? true
+        self.pinDowndetector = false
+        self.ddBaselinePercent = Defaults.downdetectorBaselinePercent
+        self.ddChartHours = Defaults.downdetectorChartHours
+        self.showResetLabels = true
+        self.use24HourTime = defaults.object(forKey: use24HourTimeKey) as? Bool ?? true
+        self.showProviderLabels = false
+        var ep: [ProviderID: Bool] = [:]
+        for p in ProviderID.allCases { ep[p] = true }
         self.enabledProviders = ep
         self.showAlertDot = defaults.object(forKey: showAlertDotKey) as? Bool ?? true
         self.sendNotifications = defaults.object(forKey: sendNotificationsKey) as? Bool ?? true
-        self.appBackgroundColor = NSColor.fromHex(defaults.string(forKey: backgroundColorKey) ?? "") ?? NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1.0)
+        self.appBackgroundColor = Defaults.backgroundColor
+
+        applyPrivacyMode(self.privacyMode)
     }
 
     func color(for provider: ProviderID) -> NSColor {
@@ -190,24 +221,24 @@ final class ColorSettings: ObservableObject {
             providerColors[provider] = provider.defaultAccentColor
             enabledProviders[provider] = true
         }
-        appBackgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1.0)
+        appBackgroundColor = Defaults.backgroundColor
         defaults.set(appBackgroundColor.toHex(), forKey: backgroundColorKey)
         save()
+        lastOpenView = "main"
         dismissOnMouseExit = true
         rememberLastView = false
         showResetLabels = true
         showProviderLabels = false
         use24HourTime = true
-        refreshIntervalMinutes = 5
-        colorizeStatusIcon = false
-        maskSensitiveData = true
-        maskPercentage = 1.0
+        refreshIntervalMinutes = Defaults.refreshIntervalMinutes
+        colorizeStatusIcon = true
+        privacyMode = .visible
+        maskPercentage = Defaults.maskPercentage
         maskDomainOnly = false
-        showSensitiveInfo = true
         showDowndetector = true
         pinDowndetector = false
-        ddBaselinePercent = 2000
-        ddChartHours = 6
+        ddBaselinePercent = Defaults.downdetectorBaselinePercent
+        ddChartHours = Defaults.downdetectorChartHours
         showAlertDot = true
         sendNotifications = true
     }
@@ -222,6 +253,20 @@ final class ColorSettings: ObservableObject {
     var downdetectorFreshnessInterval: TimeInterval {
         let refreshSeconds = refreshIntervalMinutes * 60
         return min(max(refreshSeconds * 2, 300), 900)
+    }
+
+    private func applyPrivacyMode(_ mode: PrivacyMode) {
+        switch mode {
+        case .hidden:
+            showSensitiveInfo = false
+            maskSensitiveData = false
+        case .visible:
+            showSensitiveInfo = true
+            maskSensitiveData = false
+        case .masked:
+            showSensitiveInfo = true
+            maskSensitiveData = true
+        }
     }
 
     private func save() {
